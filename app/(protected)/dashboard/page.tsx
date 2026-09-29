@@ -1,8 +1,11 @@
 import { Metadata } from "next";
+import Link from "next/link";
 import { getCurrentUser } from "@/lib/auth/session";
 import { signOutUser } from "@/lib/auth/actions";
-import { getUserStats } from "@/lib/db/queries";
-import { LogOut, LayoutDashboard, FolderOpen, Cpu, CheckCircle } from "lucide-react";
+import { getUserStats, getWorkspacesByUserId } from "@/lib/db/queries";
+import CreateWorkspaceDialog from "@/components/modules/workspace/create-workspace-dialog";
+import WorkspaceList from "@/components/modules/workspace/workspace-list";
+import { LogOut, LayoutDashboard, FolderOpen, Cpu, CheckCircle, Settings, LayoutTemplate } from "lucide-react";
 
 export const metadata: Metadata = {
   title: "Dashboard | DataForge",
@@ -11,9 +14,17 @@ export const metadata: Metadata = {
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
-  const stats = user?.id
-    ? await getUserStats(user.id).catch(() => null)
-    : null;
+  const [stats, workspaceResult] = user?.id
+    ? await Promise.all([
+        getUserStats(user.id).catch(() => null),
+        getWorkspacesByUserId(user.id, {
+          limit: 100,
+          sortBy: "createdAt",
+          sortOrder: "desc",
+        }).catch(() => null),
+      ])
+    : [null, null];
+  const workspaces = workspaceResult?.data ?? [];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -28,15 +39,31 @@ export default async function DashboardPage() {
             </h1>
           </div>
 
-          <form action={signOutUser}>
-            <button
-              type="submit"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          <div className="flex items-center gap-2">
+            <Link
+              href="/templates"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
             >
-              <LogOut className="w-4 h-4" />
-              Sign Out
-            </button>
-          </form>
+              <LayoutTemplate className="w-4 h-4" />
+              Templates
+            </Link>
+            <Link
+              href="/settings"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+            >
+              <Settings className="w-4 h-4" />
+              Settings
+            </Link>
+            <form action={signOutUser}>
+              <button
+                type="submit"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                <LogOut className="w-4 h-4" />
+                Sign Out
+              </button>
+            </form>
+          </div>
         </div>
 
         {/* Welcome */}
@@ -111,25 +138,24 @@ export default async function DashboardPage() {
 
         {/* Workspaces section */}
         <div className="bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-              Workspaces
-            </h3>
-            <a
-              href="/api/workspaces"
-              className="text-sm text-primary hover:underline"
-            >
-              View all →
-            </a>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+                Workspaces
+              </h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Workspaces organise your schema definitions and generation jobs.
+              </p>
+            </div>
+            <CreateWorkspaceDialog />
           </div>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            Workspaces organise your schema definitions and generation jobs.
-            Use the API at{" "}
-            <code className="text-xs bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded">
-              /api/workspaces
-            </code>{" "}
-            to create and manage workspaces.
-          </p>
+          {workspaceResult === null && user?.id ? (
+            <p className="text-sm text-[var(--color-destructive)]">
+              Failed to load workspaces. Please refresh the page.
+            </p>
+          ) : (
+            <WorkspaceList workspaces={workspaces} />
+          )}
         </div>
 
         {/* Quick reference */}
@@ -162,7 +188,7 @@ export default async function DashboardPage() {
               <ul className="space-y-0.5 font-mono text-xs">
                 <li>GET  /api/jobs?workspaceId=</li>
                 <li>POST /api/jobs</li>
-                <li>PATCH /api/jobs/[id]/progress</li>
+                <li>GET  /api/jobs/[id]/progress</li>
                 <li>POST /api/jobs/[id]/validate</li>
               </ul>
             </div>

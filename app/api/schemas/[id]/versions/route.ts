@@ -11,6 +11,7 @@ import {
   listVersions,
   createNewVersion,
 } from "@/lib/db/services/schema-definition-service";
+import { validateObjectId } from "@/lib/utils/validate-object-id";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -29,6 +30,8 @@ export async function GET(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const schema = await resolveAndAuthorize(id, session.user.id);
   if (!schema) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (schema === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -44,6 +47,8 @@ export async function POST(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const schema = await resolveAndAuthorize(id, session.user.id);
   if (!schema) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (schema === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });

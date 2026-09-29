@@ -16,6 +16,9 @@ import type {
   PaginatedResponse,
 } from "@/types/database";
 import { Prisma } from "@prisma/client";
+import { isValidObjectId } from "@/lib/utils/validate-object-id";
+import { deleteWorkspaceExports } from "@/lib/engine/exporter";
+import { removeQueuedJob } from "@/lib/queue/client";
 
 // ============================================
 // CRUD Operations
@@ -124,13 +127,37 @@ export async function updateWorkspace(
 }
 
 /**
- * Delete a workspace by ID.
- * Cascades to associated schemaDefinitions and generationJobs per schema rules.
+ * Delete a workspace by ID along with its jobs, validation results and
+ * schema definitions. Children are removed explicitly (jobs before schemas)
+ * because GenerationJob.schema is `onDelete: Restrict`, which can otherwise
+ * block the emulated cascade from Workspace → SchemaDefinition.
+ * Also removes the workspace's export files from the storage bucket.
  * Throws if the workspace does not exist.
  */
 export async function deleteWorkspace(id: string): Promise<Workspace> {
   try {
-    return await prisma.workspace.delete({ where: { id } });
+    const jobs = await prisma.generationJob.findMany({
+      where: { workspaceId: id },
+      select: { id: true },
+    });
+    const jobIds = jobs.map((j) => j.id);
+
+    const [, , , deleted] = await prisma.$transaction([
+      prisma.validationResult.deleteMany({ where: { jobId: { in: jobIds } } }),
+      prisma.generationJob.deleteMany({ where: { workspaceId: id } }),
+      prisma.schemaDefinition.deleteMany({ where: { workspaceId: id } }),
+      prisma.workspace.delete({ where: { id } }),
+    ]);
+
+    // Storage cleanup runs after the DB delete so a failure here never leaves
+    // live jobs pointing at missing files; leftovers are caught by the worker's
+    // orphan sweep. Queued jobs are skipped by the worker once their record is gone.
+    await Promise.allSettled(jobIds.map((jobId) => removeQueuedJob(jobId)));
+    await deleteWorkspaceExports(id).catch((storageError) => {
+      console.error(`[workspaces] Failed to delete exports for workspace ${id}:`, storageError);
+    });
+
+    return deleted;
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2025") {
@@ -169,6 +196,36 @@ export async function getWorkspaceWithSchemas(
 }
 
 /**
+ * Retrieve a workspace (with its schema definitions) only if it is owned by
+ * `userId`. Ownership is enforced in the query itself, so a workspace that
+ * exists but belongs to another user is indistinguishable from a missing one.
+ * Returns null for malformed ids, missing workspaces, and non-owned workspaces.
+ */
+export async function getWorkspaceById(
+  id: string,
+  userId: string
+): Promise<WorkspaceWithSchemas | null> {
+  // MongoDB rejects malformed ObjectIds with an error rather than a miss
+  if (!isValidObjectId(id)) return null;
+
+  try {
+    return await prisma.workspace.findFirst({
+      where: { id, userId },
+      include: {
+        schemaDefinitions: {
+          orderBy: [{ name: "asc" }, { version: "desc" }],
+        },
+      },
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new Error(`Failed to fetch workspace: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/**
  * Retrieve a workspace together with its generation jobs.
  * Returns null when not found.
  */
@@ -191,7 +248,9 @@ export async function getWorkspaceWithJobs(
 }
 
 /**
- * Retrieve a workspace with all relations (user, schemaDefinitions, generationJobs).
+ * Retrieve a workspace with its schemaDefinitions and generationJobs.
+ * The owning user is deliberately NOT included: this result is returned by the
+ * API and the User record carries the bcrypt password hash.
  * Returns null when not found.
  */
 export async function getWorkspaceWithRelations(
@@ -201,7 +260,6 @@ export async function getWorkspaceWithRelations(
     return await prisma.workspace.findUnique({
       where: { id },
       include: {
-        user: true,
         schemaDefinitions: true,
         generationJobs: true,
       },

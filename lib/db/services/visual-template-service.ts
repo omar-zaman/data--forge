@@ -13,6 +13,7 @@ import type {
   LayoutConfig,
   LayoutSection,
 } from "@/types/database";
+import { validateDocumentLayoutFields } from "@/lib/validations/document-template";
 
 // ============================================
 // CRUD Operations
@@ -91,6 +92,47 @@ export async function deleteTemplate(id: string): Promise<VisualTemplate> {
   return prisma.visualTemplate.delete({ where: { id } });
 }
 
+/** Plain, serializable template shape handed to client components. */
+export interface TemplateListItem {
+  id: string;
+  name: string;
+  category: string | null;
+  isPublic: boolean;
+  isOwner: boolean;
+  layoutConfig: Record<string, unknown>;
+  updatedAt: string;
+}
+
+/**
+ * The user's own templates plus other users' public templates, newest first,
+ * serialized for server → client props.
+ */
+export async function listTemplatesForUser(
+  userId: string
+): Promise<{ own: TemplateListItem[]; shared: TemplateListItem[] }> {
+  const [own, shared] = await Promise.all([
+    listTemplates({ userId }),
+    prisma.visualTemplate.findMany({
+      where: { isPublic: true, userId: { not: userId } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+  ]);
+  const toItem = (t: VisualTemplate): TemplateListItem => ({
+    id: t.id,
+    name: t.name,
+    category: t.category,
+    isPublic: t.isPublic,
+    isOwner: t.userId === userId,
+    layoutConfig:
+      t.layoutConfig && typeof t.layoutConfig === "object" && !Array.isArray(t.layoutConfig)
+        ? (t.layoutConfig as Record<string, unknown>)
+        : {},
+    updatedAt: t.updatedAt.toISOString(),
+  });
+  return { own: own.map(toItem), shared: shared.map(toItem) };
+}
+
 // ============================================
 // Layout Config Validation
 // ============================================
@@ -112,6 +154,27 @@ const VALID_FONT_WEIGHTS = [
   "bolder",
 ] as const;
 const VALID_FONT_STYLES = ["normal", "italic", "oblique"] as const;
+const LAYOUT_CONFIG_KEYS = [
+  "pageSize",
+  "orientation",
+  "margins",
+  "sections",
+  "fonts",
+  "colors",
+  "documentType",
+  "mappingKeys",
+  "layoutStyle",
+  "currency",
+  "branding",
+  "typography",
+] as const;
+const DOCUMENT_ONLY_KEYS = [
+  "mappingKeys",
+  "layoutStyle",
+  "currency",
+  "branding",
+  "typography",
+] as const;
 
 /**
  * Validate a LayoutConfig object structure.
@@ -125,6 +188,26 @@ export function validateLayoutConfig(config: LayoutConfig): {
 
   if (config === null || typeof config !== "object" || Array.isArray(config)) {
     return { isValid: false, errors: ["layoutConfig must be an object"] };
+  }
+
+  // Strict key set: anything unknown is rejected
+  const unknownKeys = Object.keys(config).filter(
+    (key) => !(LAYOUT_CONFIG_KEYS as readonly string[]).includes(key)
+  );
+  if (unknownKeys.length) {
+    errors.push(`layoutConfig has unknown keys: ${unknownKeys.join(", ")}`);
+  }
+
+  // Document templates must declare their full mapping contract
+  if (config.documentType !== undefined) {
+    errors.push(
+      ...validateDocumentLayoutFields(config as unknown as Record<string, unknown>)
+    );
+  } else {
+    const stray = DOCUMENT_ONLY_KEYS.filter((key) => config[key] !== undefined);
+    if (stray.length) {
+      errors.push(`${stray.join(", ")} require documentType to be set`);
+    }
   }
 
   // pageSize

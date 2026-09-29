@@ -1,15 +1,17 @@
 import { Suspense } from "react";
-import { notFound } from "next/navigation";
-import { headers } from "next/headers";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { WorkspaceWithRelations } from "@/types/database";
-
-// Forward-declared import — SchemaDesigner is created in task 3.1
-import SchemaDesigner from "@/components/modules/schema/schema-designer";
+import { getCurrentUserId } from "@/lib/auth/session";
+import { getWorkspaceById } from "@/lib/db/services/workspace-service";
+import { parseTables } from "@/lib/db/services/schema-definition-service";
+import type { SchemaSummary } from "@/components/modules/schema/schema-picker";
+import TabularWorkspace from "@/components/modules/jobs/tabular-workspace";
+import WorkspaceSettings from "@/components/modules/workspace/workspace-settings";
+import DocumentWorkspace from "@/components/modules/documents/document-workspace";
+import { listTemplatesForUser } from "@/lib/db/services/visual-template-service";
 
 export const metadata = {
   title: "Workspace | DataForge",
@@ -51,30 +53,32 @@ interface PageProps {
 export default async function WorkspacePage({ params }: PageProps) {
   const { id } = await params;
 
-  // Forward session cookie so the API can authenticate the request
-  const cookieHeader = (await headers()).get("cookie") ?? "";
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    redirect("/login");
+  }
 
-  const baseUrl =
-    process.env.NEXTAUTH_URL ??
-    process.env.NEXT_PUBLIC_APP_URL ??
-    "http://localhost:3000";
-
-  const res = await fetch(`${baseUrl}/api/workspaces/${id}`, {
-    headers: { cookie: cookieHeader },
-    // Always re-fetch on each request — workspace data changes over time
-    cache: "no-store",
-  });
-
-  if (res.status === 404 || res.status === 403 || res.status === 401) {
+  // Ownership is enforced inside the query — another user's workspace
+  // resolves to null exactly like a missing one (no IDOR, no existence leak)
+  const workspace = await getWorkspaceById(id, userId);
+  if (!workspace) {
     notFound();
   }
 
-  if (!res.ok) {
-    // Unexpected server error — still show 404 to the user
-    notFound();
-  }
+  // Hand the client only plain, serializable fields of every schema version
+  const initialSchemas: SchemaSummary[] = workspace.schemaDefinitions.map(
+    (schema) => ({
+      id: schema.id,
+      name: schema.name,
+      version: schema.version,
+      dataType: schema.dataType,
+      tables: parseTables(schema.tables),
+    })
+  );
 
-  const workspace: WorkspaceWithRelations = await res.json();
+  // Own + public templates for the Documents tab's visual picker
+  const { own, shared } = await listTemplatesForUser(userId);
+  const templates = [...own, ...shared];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -90,58 +94,49 @@ export default async function WorkspacePage({ params }: PageProps) {
         </Link>
 
         {/* Workspace header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-50">
-            {workspace.name}
-          </h1>
-          {workspace.description && (
-            <p className="mt-1.5 text-slate-500 dark:text-slate-400 text-sm">
-              {workspace.description}
-            </p>
-          )}
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-50 break-words">
+              {workspace.name}
+            </h1>
+            {workspace.description && (
+              <p className="mt-1.5 text-slate-500 dark:text-slate-400 text-sm">
+                {workspace.description}
+              </p>
+            )}
+          </div>
+          <WorkspaceSettings
+            workspaceId={workspace.id}
+            name={workspace.name}
+            description={workspace.description}
+          />
         </div>
 
         {/* Tabbed navigation */}
-        <Tabs defaultValue="tabular">
+        <Tabs defaultValue="schema-designer">
           <TabsList className="mb-6">
-            <TabsTrigger value="tabular">Tabular</TabsTrigger>
-            <TabsTrigger value="relational">Relational</TabsTrigger>
+            <TabsTrigger value="schema-designer">Schema Designer</TabsTrigger>
             <TabsTrigger value="documents">Documents</TabsTrigger>
           </TabsList>
 
-          {/* Tabular tab — hosts the schema designer */}
-          <TabsContent value="tabular">
+          {/* Schema Designer — single- and multi-table (relational) schemas,
+              generation and job history */}
+          <TabsContent value="schema-designer">
             <Suspense fallback={<SchemaDesignerSkeleton />}>
-              <SchemaDesigner workspaceId={id} />
+              <TabularWorkspace
+                workspaceId={workspace.id}
+                initialSchemas={initialSchemas}
+              />
             </Suspense>
           </TabsContent>
 
-          {/* Relational tab — coming soon */}
-          <TabsContent value="relational">
-            <Card>
-              <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-                <p className="text-lg font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Relational Designer
-                </p>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Coming Soon
-                </p>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          {/* Documents tab — coming soon */}
+          {/* Documents — map a relational schema onto a visual template, render PDFs */}
           <TabsContent value="documents">
-            <Card>
-              <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-                <p className="text-lg font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Document Designer
-                </p>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Coming Soon
-                </p>
-              </CardContent>
-            </Card>
+            <DocumentWorkspace
+              workspaceId={workspace.id}
+              initialSchemas={initialSchemas}
+              templates={templates}
+            />
           </TabsContent>
         </Tabs>
 

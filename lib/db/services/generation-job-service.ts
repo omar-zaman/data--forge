@@ -4,9 +4,12 @@
  *
  * Status transitions:
  *   queueJob    → QUEUED      (progress = 0)
- *   processJob  → PROCESSING
- *   validateJob → VALIDATING  (stub validation, creates ValidationResult)
- *   completeJob → COMPLETED   (progress = 100, completedAt = now, exportUrl)
+ *   processJob  → PROCESSING → VALIDATING → COMPLETED | FAILED (run by the
+ *                 BullMQ worker: batch generation + in-memory audit, upload to
+ *                 S3/R2, presigned exportUrl)
+ *   validateJob → records the audit report as a ValidationResult
+ *   completeJob → COMPLETED   (progress = 100, completedAt = now, exportUrl,
+ *                 healthCheckPassed)
  *   failJob     → FAILED      (validationErrors = errors array)
  */
 
@@ -19,11 +22,46 @@ import type {
   ValidationError,
   CreateGenerationJobInput,
   UpdateGenerationJobInput,
+  TableStructure,
   PaginationParams,
   PaginatedResponse,
 } from "@/types/database";
 import { JobStatus } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import { TabularEngineError, randomSeed } from "@/lib/engine/tabular-engine";
+import { resolveFakerLocale } from "@/lib/engine/locale";
+import {
+  createRelationalTableGenerator,
+  planRelationalSchema,
+  tableSeed,
+  tableStructuresToRelationalInput,
+  type KeyPools,
+  type PlannedTable,
+} from "@/lib/engine/relational-engine";
+import {
+  ArchiveError,
+  ExportError,
+  createJsonExportWriter,
+  createSqlDumpWriter,
+  createTableExportWriter,
+  deleteJobExports,
+  publishJobExport,
+  removeJobStaging,
+  sanitizeFileName,
+  type SqlDumpWriter,
+  type SqlTable,
+  type TableExportWriter,
+} from "@/lib/engine/exporter";
+import {
+  StorageError,
+  deletePrefix,
+  jobExportPrefix,
+  jobIdFromKey,
+  listObjects,
+  refreshPresignedUrl,
+} from "@/lib/storage/s3";
+import { removeQueuedJob } from "@/lib/queue/client";
+import { createDatasetAuditor, type AuditReport } from "@/lib/engine/auditor";
 
 // ============================================
 // CRUD Operations
@@ -61,13 +99,18 @@ export async function getJob(id: string): Promise<GenerationJob | null> {
   }
 }
 
+export type GenerationJobListItem = GenerationJob & {
+  validationResults: Pick<ValidationResult, "id" | "isPassed" | "summary">[];
+};
+
 /**
- * List generation jobs with optional filtering and pagination.
+ * List generation jobs with optional filtering and pagination. Each job carries
+ * its latest ValidationResult summary (issues are fetched per job on demand).
  */
 export async function listJobs(
   filters?: GenerationJobFilters,
   pagination?: PaginationParams
-): Promise<PaginatedResponse<GenerationJob>> {
+): Promise<PaginatedResponse<GenerationJobListItem>> {
   const page = pagination?.page ?? 1;
   const limit = pagination?.limit ?? 10;
   const skip = (page - 1) * limit;
@@ -86,7 +129,19 @@ export async function listJobs(
 
   try {
     const [data, total] = await Promise.all([
-      prisma.generationJob.findMany({ where, skip, take: limit, orderBy }),
+      prisma.generationJob.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        include: {
+          validationResults: {
+            select: { id: true, isPassed: true, summary: true },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+      }),
       prisma.generationJob.count({ where }),
     ]);
 
@@ -147,45 +202,357 @@ export async function queueJob(id: string): Promise<GenerationJob> {
   return updateJobStatus(id, JobStatus.QUEUED, 0);
 }
 
-/**
- * Mark a job as actively processing.
- * Sets status → PROCESSING.
- */
-export async function processJob(id: string): Promise<GenerationJob> {
-  return updateJobStatus(id, JobStatus.PROCESSING);
+// ============================================
+// Job Execution
+// ============================================
+
+export const JOB_BATCH_SIZE = 1_000;
+export const JOB_DEFAULT_ROW_COUNT = 1_000;
+export const JOB_MAX_ROW_COUNT = 1_000_000;
+
+/** Yields to the event loop so the worker can renew its queue lock between batches. */
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** Atomic $set of the progress field only. */
+async function setJobProgress(id: string, progress: number): Promise<void> {
+  await prisma.generationJob.update({ where: { id }, data: { progress } });
+}
+
+function parseTables(raw: Prisma.JsonValue): TableStructure[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown as Partial<TableStructure>[]).filter(
+    (t): t is TableStructure => Array.isArray(t?.columns) && t.columns.length > 0
+  );
+}
+
+function toSqlTable(table: PlannedTable): SqlTable {
+  return {
+    name: table.name,
+    columns: table.columns.map((c) => ({
+      key: c.key,
+      name: c.name,
+      type: c.type,
+      nullable: !c.isPrimaryKey && c.nullRate > 0,
+      isPrimaryKey: c.isPrimaryKey,
+      isUnique: c.isUnique,
+    })),
+    foreignKeys: table.foreignKeys.map((fk) => ({
+      fromColumn: fk.fromColumn,
+      toTable: fk.toTable,
+      toColumn: fk.toColumn,
+      onDelete: fk.onDelete,
+      onUpdate: fk.onUpdate,
+    })),
+  };
+}
+
+/** One CSV per table named after it (customers.csv, orders.csv, …), de-duplicated. */
+function csvFileBases(tables: PlannedTable[]): string[] {
+  const used = new Set<string>();
+  return tables.map((table) => {
+    const base = sanitizeFileName(table.name, `table${table.index + 1}`);
+    let name = base;
+    for (let i = 2; used.has(name.toLowerCase()); i++) name = `${base}_${i}`;
+    used.add(name.toLowerCase());
+    return name;
+  });
 }
 
 /**
- * Transition a job to the VALIDATING phase.
- * Creates a stub ValidationResult record for the job.
+ * Execute a queued job (called by the BullMQ worker): generate rows in batches,
+ * stream them to local staging files (CSV, JSON, SQL) while auditing them in
+ * memory, upload the artifacts to S3/R2 and record progress, the health check
+ * report and a 24-hour presigned exportUrl. Audit errors don't fail the job:
+ * they set healthCheckPassed = false so the data stays downloadable.
+ *
+ * Only jobs whose workspace belongs to `userId` are processed. The job is claimed
+ * atomically; a PROCESSING/VALIDATING job may be re-claimed because BullMQ only redelivers
+ * a job after the previous worker's lock has expired (i.e. it crashed).
+ * Any failure marks the job FAILED with the error in validationErrors.
  */
-export async function validateJob(id: string): Promise<GenerationJob> {
-  // Ensure the job exists before creating the validation record
-  const job = await getJob(id);
+export async function processJob(
+  id: string,
+  userId: string
+): Promise<GenerationJob> {
+  const job = await prisma.generationJob.findUnique({
+    where: { id },
+    include: { workspace: { select: { userId: true } }, schema: true },
+  });
   if (!job) {
     throw new Error(`Generation job with id "${id}" not found.`);
   }
+  if (job.workspace.userId !== userId) {
+    throw new Error(`Generation job "${id}" does not belong to the current user.`);
+  }
 
-  // Create a stub validation result – real validation logic hooks in here
-  await prisma.validationResult.create({
-    data: {
-      jobId: id,
-      summary: {},
-      isPassed: false,
-      errors: [],
+  const claimed = await prisma.generationJob.updateMany({
+    where: {
+      id,
+      status: { in: [JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.VALIDATING] },
     },
+    data: { status: JobStatus.PROCESSING, progress: 0, healthCheckPassed: null },
+  });
+  if (claimed.count === 0) {
+    return (await getJob(id)) as GenerationJob;
+  }
+
+  const writers: TableExportWriter[] = [];
+  const jsonWriters: TableExportWriter[] = [];
+  let sqlWriter: SqlDumpWriter | undefined;
+  try {
+    const { schema } = job;
+    if (schema.workspaceId !== job.workspaceId) {
+      throw new Error("Schema does not belong to the job's workspace.");
+    }
+
+    const tables = parseTables(schema.tables);
+    if (tables.length === 0) {
+      throw new Error(`Schema "${schema.name}" has no tables with columns to generate.`);
+    }
+
+    // Parents come before children, so every FK value already exists when it's sampled
+    // and the SQL dump inserts in an order that never violates a constraint
+    const plan = planRelationalSchema(tableStructuresToRelationalInput(tables));
+    const fileBases = csvFileBases(plan.tables);
+    sqlWriter = await createSqlDumpWriter(id, plan.tables.map(toSqlTable));
+    // Audits each batch as it is written, so only key-column values stay in memory
+    const auditor = createDatasetAuditor(plan.tables);
+
+    const rowCount = Math.min(
+      Math.max(Math.floor(job.rowCount ?? JOB_DEFAULT_ROW_COUNT), 1),
+      JOB_MAX_ROW_COUNT
+    );
+    const baseSeed = job.seed ?? randomSeed();
+    const locale = resolveFakerLocale(job.locale);
+    const pools: KeyPools = new Map();
+    let lastProgress = 0;
+
+    for (const [position, table] of plan.tables.entries()) {
+      const writer = await createTableExportWriter(id, fileBases[position], table.columns);
+      writers.push(writer);
+      const jsonWriter = await createJsonExportWriter(id, fileBases[position], table.columns);
+      jsonWriters.push(jsonWriter);
+
+      // Tables with a cardinality get min–max rows per parent row; the rest get
+      // rowCount. The seed is offset per table so identical tables differ.
+      const generator = createRelationalTableGenerator(
+        table,
+        pools,
+        tableSeed(baseSeed, table),
+        { rowCount, maxRows: JOB_MAX_ROW_COUNT, locale }
+      );
+      const tableRows = generator.rowCount;
+
+      for (let offset = 0; offset < tableRows; offset += JOB_BATCH_SIZE) {
+        const size = Math.min(JOB_BATCH_SIZE, tableRows - offset);
+        const rows = generator.next(size);
+        await writer.writeBatch(rows);
+        await jsonWriter.writeBatch(rows);
+        await sqlWriter.writeBatch(table.name, rows);
+        auditor.observe(table.name, rows);
+
+        // Child row counts aren't known until their parents exist, so each
+        // table is an equal share of the bar. Keep 100 reserved for completion.
+        const done = (position + (offset + size) / tableRows) / plan.tables.length;
+        const progress = Math.min(99, Math.floor(done * 100));
+        if (progress !== lastProgress) {
+          await setJobProgress(id, progress);
+          lastProgress = progress;
+        }
+        await yieldToEventLoop();
+      }
+
+      await writer.close();
+      await jsonWriter.close();
+    }
+    await sqlWriter.close();
+
+    // Health checks run before anything is published or the job is completed
+    await updateJobStatus(id, JobStatus.VALIDATING, 99);
+    const report = auditor.finalize();
+
+    // exportUrl points at the CSV (single table) or dataset.zip (CSV + JSON + SQL);
+    // every file sits under the job's prefix and is served by /api/jobs/[id]/download
+    const { primary } = await publishJobExport(
+      job.workspaceId,
+      id,
+      `${schema.name}_v${schema.version}`,
+      writers,
+      sqlWriter,
+      jsonWriters
+    );
+    await validateJob(id, report);
+    return await completeJob(id, primary.url, primary.sizeBytes, report.passed);
+  } catch (error) {
+    await Promise.allSettled([
+      ...writers.map((w) => w.abort()),
+      ...jsonWriters.map((w) => w.abort()),
+      sqlWriter?.abort(),
+    ]);
+    // Covers partial uploads and jobs deleted mid-run (completeJob → not found)
+    await deleteJobExports(job.workspaceId, id).catch((cleanupError) => {
+      console.error(`[jobs] Failed to clean up exports for job ${id}:`, cleanupError);
+    });
+
+    const message = error instanceof Error ? error.message : String(error);
+    return failJob(id, [
+      {
+        message,
+        severity: "error",
+        code:
+          error instanceof TabularEngineError
+            ? "GENERATION_ERROR"
+            : error instanceof ArchiveError
+              ? "ARCHIVE_ERROR"
+              : error instanceof ExportError || error instanceof StorageError
+              ? "EXPORT_ERROR"
+              : "JOB_FAILED",
+        ...(error instanceof TabularEngineError && error.column && { field: error.column }),
+      },
+    ]);
+  } finally {
+    await removeJobStaging(id).catch(() => undefined);
+  }
+}
+
+/**
+ * Delete a job, drop it from the queue if it hasn't started, and remove its
+ * files from the storage bucket.
+ */
+export async function deleteJob(id: string): Promise<GenerationJob> {
+  let job: GenerationJob;
+  try {
+    job = await prisma.generationJob.delete({ where: { id } });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === "P2025") {
+        throw new Error(`Generation job with id "${id}" not found.`);
+      }
+      throw new Error(`Failed to delete generation job: ${error.message}`);
+    }
+    throw error;
+  }
+
+  // An active job can't be removed from the queue; the worker cleans up its own
+  // upload once it finds the record gone.
+  await removeQueuedJob(id).catch((error) => {
+    console.error(`[jobs] Failed to remove job ${id} from the queue:`, error);
+  });
+  // Anything missed here is caught by sweepOrphanedExports
+  await deleteJobExports(job.workspaceId, id).catch((error) => {
+    console.error(`[jobs] Failed to delete exports for job ${id}:`, error);
   });
 
-  return updateJobStatus(id, JobStatus.VALIDATING);
+  return job;
+}
+
+// ============================================
+// Export URLs & Storage Cleanup
+// ============================================
+
+/**
+ * Re-signs a job's presigned exportUrl when it has expired (or is about to) and
+ * persists the new URL, so the UI always receives a working download link.
+ */
+export async function withFreshExportUrl<T extends GenerationJob>(job: T): Promise<T> {
+  if (!job.exportUrl) return job;
+
+  try {
+    const fresh = await refreshPresignedUrl(
+      job.exportUrl,
+      jobExportPrefix(job.workspaceId, job.id)
+    );
+    if (!fresh) return job;
+
+    await prisma.generationJob.updateMany({
+      where: { id: job.id, exportUrl: job.exportUrl },
+      data: { exportUrl: fresh },
+    });
+    return { ...job, exportUrl: fresh };
+  } catch (error) {
+    console.error(`[jobs] Failed to refresh exportUrl for job ${job.id}:`, error);
+    return job;
+  }
+}
+
+/**
+ * Deletes bucket objects whose job no longer exists (e.g. a storage delete
+ * failed, or a job was removed while its upload was in flight). Objects newer
+ * than `minAgeMs` are skipped to stay clear of uploads that are still running.
+ */
+export async function sweepOrphanedExports(minAgeMs = 60 * 60 * 1000): Promise<number> {
+  const prefixesByJob = new Map<string, string>();
+  const cutoff = Date.now() - minAgeMs;
+
+  for await (const object of listObjects("workspaces/")) {
+    if (!object.Key) continue;
+    const jobId = jobIdFromKey(object.Key);
+    if (!jobId) continue;
+    if (object.LastModified && object.LastModified.getTime() > cutoff) continue;
+    const workspacePrefix = object.Key.slice(0, object.Key.indexOf("/jobs/") + 1);
+    prefixesByJob.set(jobId, `${workspacePrefix}jobs/${jobId}/`);
+  }
+
+  const jobIds = [...prefixesByJob.keys()];
+  let removed = 0;
+
+  for (let i = 0; i < jobIds.length; i += 500) {
+    const chunk = jobIds.slice(i, i + 500);
+    const existing = await prisma.generationJob.findMany({
+      where: { id: { in: chunk } },
+      select: { id: true },
+    });
+    const live = new Set(existing.map((j) => j.id));
+
+    for (const jobId of chunk) {
+      if (live.has(jobId)) continue;
+      removed += await deletePrefix(prefixesByJob.get(jobId)!);
+    }
+  }
+
+  return removed;
+}
+
+/**
+ * Record a job's audit report as its ValidationResult, replacing any result
+ * left by an earlier (crashed) run. Issues are stored in `errors` as
+ * { table, column, type: "WARNING" | "ERROR", check, message, … }.
+ */
+export async function validateJob(
+  id: string,
+  report: AuditReport
+): Promise<ValidationResult> {
+  try {
+    const [, result] = await prisma.$transaction([
+      prisma.validationResult.deleteMany({ where: { jobId: id } }),
+      prisma.validationResult.create({
+        data: {
+          jobId: id,
+          isPassed: report.passed,
+          summary: report.summary as unknown as Prisma.InputJsonValue,
+          errors: report.issues as unknown as Prisma.InputJsonValue,
+        },
+      }),
+    ]);
+    return result;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new Error(`Failed to record validation result: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 /**
  * Mark a job as successfully completed.
- * Sets status → COMPLETED, progress = 100, records completedAt and exportUrl.
+ * Sets status → COMPLETED, progress = 100, records completedAt, exportUrl and
+ * the health check outcome (true when the audit found no errors).
  */
 export async function completeJob(
   id: string,
-  exportUrl: string
+  exportUrl: string,
+  fileSizeBytes?: number,
+  healthCheckPassed?: boolean
 ): Promise<GenerationJob> {
   try {
     return await prisma.generationJob.update({
@@ -195,6 +562,8 @@ export async function completeJob(
         progress: 100,
         completedAt: new Date(),
         exportUrl,
+        ...(fileSizeBytes !== undefined && { fileSizeBytes }),
+        ...(healthCheckPassed !== undefined && { healthCheckPassed }),
       },
     });
   } catch (error) {

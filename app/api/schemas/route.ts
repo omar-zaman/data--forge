@@ -13,6 +13,7 @@ import {
 } from "@/lib/db/services/schema-definition-service";
 import type { TableStructure } from "@/types/database";
 import { DataType } from "@prisma/client";
+import { validateObjectId } from "@/lib/utils/validate-object-id";
 
 export async function GET(req: NextRequest) {
   const session = await auth();
@@ -27,6 +28,8 @@ export async function GET(req: NextRequest) {
       { status: 400 }
     );
   }
+  const invalidId = validateObjectId(workspaceId, "workspaceId");
+  if (invalidId) return invalidId;
 
   // Verify the caller owns the workspace
   const workspace = await getWorkspace(workspaceId);
@@ -63,6 +66,8 @@ export async function POST(req: NextRequest) {
   if (!workspaceId || typeof workspaceId !== "string") {
     return NextResponse.json({ error: "workspaceId is required" }, { status: 400 });
   }
+  const invalidId = validateObjectId(workspaceId, "workspaceId");
+  if (invalidId) return invalidId;
   if (!name || typeof name !== "string" || !name.trim()) {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
   }
