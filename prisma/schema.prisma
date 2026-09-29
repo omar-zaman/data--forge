@@ -1,0 +1,228 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// Enums
+// ============================================
+
+enum UserRole {
+  USER
+  ADMIN
+  DEVELOPER
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  VALIDATING
+  COMPLETED
+  FAILED
+}
+
+enum ExportFormat {
+  CSV
+  JSON
+  SQL
+  PDF
+  ZIP
+}
+
+enum DataType {
+  TABULAR
+  RELATIONAL
+  DOCUMENT
+}
+
+// ============================================
+// User Management
+// ============================================
+
+model User {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  password      String?
+  role          UserRole  @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  workspaces      Workspace[]
+  visualTemplates VisualTemplate[]
+  accounts        Account[]
+  sessions        Session[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// ============================================
+// NextAuth.js Tables
+// ============================================
+
+model Account {
+  id                String  @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String  @db.ObjectId
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionToken String   @unique
+  userId       String   @db.ObjectId
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================
+// Workspace Management
+// ============================================
+
+model Workspace {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  userId      String   @db.ObjectId
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schemaDefinitions SchemaDefinition[]
+  generationJobs    GenerationJob[]
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("workspaces")
+}
+
+// ============================================
+// Schema Definitions
+// ============================================
+
+model SchemaDefinition {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId String   @db.ObjectId
+  name        String
+  dataType    DataType
+  tables      Json     @default("[]")
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  generationJobs GenerationJob[]
+
+  @@index([workspaceId])
+  @@index([name])
+  @@index([version])
+  @@map("schema_definitions")
+}
+
+// ============================================
+// Generation & Processing
+// ============================================
+
+model GenerationJob {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  workspaceId       String    @db.ObjectId
+  schemaId          String    @db.ObjectId
+  status            JobStatus @default(QUEUED)
+  progress          Int       @default(0)
+  rowCount          Int?
+  seed              Int?
+  locale            String?
+  healthCheckPassed Boolean?
+  validationErrors  Json      @default("[]")
+  exportUrl         String?
+  fileSizeBytes     Int?
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  schema            SchemaDefinition   @relation(fields: [schemaId], references: [id], onDelete: Restrict)
+  validationResults ValidationResult[]
+
+  @@index([workspaceId])
+  @@index([schemaId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("generation_jobs")
+}
+
+model ValidationResult {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  jobId     String   @db.ObjectId
+  summary   Json     @default("{}")
+  isPassed  Boolean  @default(false)
+  errors    Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  job GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([isPassed])
+  @@map("validation_results")
+}
+
+// ============================================
+// Visual Templates
+// ============================================
+
+model VisualTemplate {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @db.ObjectId
+  name         String
+  category     String?
+  layoutConfig Json     @default("{}")
+  isPublic     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([category])
+  @@index([isPublic])
+  @@map("visual_templates")
+}
