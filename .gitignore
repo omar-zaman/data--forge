@@ -48,3 +48,6 @@ next-env.d.ts
 
 # generated job exports
 /public/exports/
+
+# local dev services (Redis binary, S3/Redis data)
+/.services/

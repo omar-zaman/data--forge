@@ -1,250 +1,121 @@
 /**
  * Database Seeding Script
- * Populates the HackDataV2 schema with demo data.
+ * Clears the database and populates a ready-to-demo account.
  * Run with: npm run db:seed
+ *
+ * Login: demo@dataforge.ai / password123
  */
 
-import { PrismaClient, UserRole, JobStatus, DataType } from "@prisma/client";
+import bcrypt from "bcryptjs";
+import { PrismaClient, UserRole, DataType } from "@prisma/client";
+import type { TableStructure } from "../../types/database";
 
 const prisma = new PrismaClient();
+
+const DEMO_EMAIL = "demo@dataforge.ai";
+const DEMO_PASSWORD = "password123";
+const BCRYPT_COST = 12;
+
+/**
+ * Customers → Orders, in the exact shape the Schema Designer saves
+ * (see tableDraftsToTableStructures in components/modules/schema/schema-designer.tsx).
+ */
+const CUSTOMERS_ORDERS_TABLES: TableStructure[] = [
+  {
+    name: "customers",
+    columns: [
+      { name: "id", type: "UUID", nullable: false, primaryKey: true, constraints: [] },
+      { name: "first_name", type: "FirstName", nullable: false, constraints: [] },
+      { name: "last_name", type: "LastName", nullable: false, constraints: [] },
+      { name: "email", type: "Email", nullable: false, constraints: [{ type: "UNIQUE" }] },
+      { name: "phone", type: "Phone", nullable: true, constraints: [] },
+      { name: "city", type: "City", nullable: false, constraints: [] },
+      { name: "country", type: "Country", nullable: false, constraints: [] },
+      { name: "signup_date", type: "DateTime", nullable: false, constraints: [] },
+    ],
+    nullRates: { phone: 0.1 },
+  },
+  {
+    name: "orders",
+    columns: [
+      { name: "id", type: "UUID", nullable: false, primaryKey: true, constraints: [] },
+      { name: "customer_id", type: "UUID", nullable: false, constraints: [] },
+      { name: "order_date", type: "Date", nullable: false, constraints: [] },
+      { name: "quantity", type: "Integer", nullable: false, constraints: [] },
+      { name: "total_amount", type: "Float", nullable: false, constraints: [] },
+      { name: "is_paid", type: "Boolean", nullable: false, constraints: [] },
+    ],
+    foreignKeys: [{ fromColumn: "customer_id", toTable: "customers", toColumn: "id" }],
+    cardinalities: {
+      customer_id: {
+        relationship: "oneToMany",
+        targetTable: "customers",
+        minRecords: 1,
+        maxRecords: 5,
+      },
+    },
+  },
+];
+
+/**
+ * MongoDB has no foreign keys, so Prisma emulates referential actions in the
+ * client. Delete children before parents so nothing trips the emulated
+ * Restrict on GenerationJob.schema.
+ */
+async function clearDatabase() {
+  await prisma.validationResult.deleteMany();
+  await prisma.generationJob.deleteMany();
+  await prisma.schemaDefinition.deleteMany();
+  await prisma.workspace.deleteMany();
+  await prisma.visualTemplate.deleteMany();
+  await prisma.session.deleteMany();
+  await prisma.account.deleteMany();
+  await prisma.verificationToken.deleteMany();
+  await prisma.user.deleteMany();
+}
 
 async function main() {
   console.log("🌱 Starting database seed...");
 
-  // ============================================================
-  // Users
-  // ============================================================
-  const adminUser = await prisma.user.upsert({
-    where: { email: "admin@dataforge.dev" },
-    update: {},
-    create: {
-      email: "admin@dataforge.dev",
-      name: "Admin User",
-      role: UserRole.ADMIN,
-      image: "https://api.dicebear.com/7.x/avataaars/svg?seed=Admin",
-    },
-  });
+  await clearDatabase();
+  console.log("🧹 Cleared existing data");
 
-  const developerUser = await prisma.user.upsert({
-    where: { email: "developer@dataforge.dev" },
-    update: {},
-    create: {
-      email: "developer@dataforge.dev",
-      name: "John Developer",
-      role: UserRole.DEVELOPER,
-      image: "https://api.dicebear.com/7.x/avataaars/svg?seed=John",
-    },
-  });
-
-  const regularUser = await prisma.user.upsert({
-    where: { email: "user@dataforge.dev" },
-    update: {},
-    create: {
-      email: "user@dataforge.dev",
-      name: "Jane User",
+  const demoUser = await prisma.user.create({
+    data: {
+      email: DEMO_EMAIL,
+      name: "Demo User",
+      password: await bcrypt.hash(DEMO_PASSWORD, BCRYPT_COST),
       role: UserRole.USER,
-      image: "https://api.dicebear.com/7.x/avataaars/svg?seed=Jane",
+      emailVerified: new Date(),
+      image: "https://api.dicebear.com/7.x/avataaars/svg?seed=Demo",
     },
   });
+  console.log("✅ Created demo user");
 
-  console.log("✅ Created users");
-
-  // ============================================================
-  // Workspaces (replaces Projects)
-  // ============================================================
-  const workspace1 = await prisma.workspace.create({
+  const workspace = await prisma.workspace.create({
     data: {
-      name: "E-Commerce Platform",
-      description: "Synthetic data for an e-commerce application",
-      userId: developerUser.id,
+      name: "Demo Workspace",
+      description: "Sample workspace with a Customers → Orders relational schema",
+      userId: demoUser.id,
     },
   });
+  console.log("✅ Created workspace");
 
-  const workspace2 = await prisma.workspace.create({
+  await prisma.schemaDefinition.create({
     data: {
-      name: "Task Management System",
-      description: "Synthetic data for a collaborative task tracker",
-      userId: developerUser.id,
-    },
-  });
-
-  const workspace3 = await prisma.workspace.create({
-    data: {
-      name: "Blog Platform",
-      description: "Synthetic data for a modern blog platform",
-      userId: regularUser.id,
-    },
-  });
-
-  console.log("✅ Created workspaces");
-
-  // ============================================================
-  // Schema Definitions
-  // ============================================================
-  const schema1 = await prisma.schemaDefinition.create({
-    data: {
-      workspaceId: workspace1.id,
-      name: "E-Commerce Schema",
+      workspaceId: workspace.id,
+      name: "Customers & Orders",
       dataType: DataType.RELATIONAL,
       version: 1,
-      tables: [
-        {
-          name: "products",
-          columns: [
-            { name: "id", type: "string", primaryKey: true },
-            { name: "name", type: "string", nullable: false },
-            { name: "price", type: "number", nullable: false },
-            { name: "category", type: "string" },
-            { name: "stock", type: "number" },
-          ],
-        },
-        {
-          name: "orders",
-          columns: [
-            { name: "id", type: "string", primaryKey: true },
-            { name: "userId", type: "string" },
-            { name: "total", type: "number" },
-            { name: "status", type: "string" },
-          ],
-          foreignKeys: [
-            { fromColumn: "userId", toTable: "products", toColumn: "id" },
-          ],
-        },
-      ],
+      tables: CUSTOMERS_ORDERS_TABLES as object[],
     },
   });
-
-  const schema2 = await prisma.schemaDefinition.create({
-    data: {
-      workspaceId: workspace2.id,
-      name: "Task Schema",
-      dataType: DataType.TABULAR,
-      version: 1,
-      tables: [
-        {
-          name: "tasks",
-          columns: [
-            { name: "id", type: "string", primaryKey: true },
-            { name: "title", type: "string", nullable: false },
-            { name: "description", type: "text" },
-            { name: "status", type: "string" },
-            { name: "assigneeId", type: "string" },
-          ],
-        },
-      ],
-    },
-  });
-
-  console.log("✅ Created schema definitions");
-
-  // ============================================================
-  // Generation Jobs
-  // ============================================================
-  const job1 = await prisma.generationJob.create({
-    data: {
-      workspaceId: workspace1.id,
-      schemaId: schema1.id,
-      status: JobStatus.COMPLETED,
-      progress: 100,
-      rowCount: 500,
-      locale: "en_US",
-      healthCheckPassed: true,
-      completedAt: new Date(),
-    },
-  });
-
-  await prisma.generationJob.create({
-    data: {
-      workspaceId: workspace2.id,
-      schemaId: schema2.id,
-      status: JobStatus.PROCESSING,
-      progress: 45,
-      rowCount: 200,
-      locale: "en_US",
-    },
-  });
-
-  await prisma.generationJob.create({
-    data: {
-      workspaceId: workspace3.id,
-      schemaId: schema2.id,
-      status: JobStatus.QUEUED,
-      progress: 0,
-    },
-  });
-
-  console.log("✅ Created generation jobs");
-
-  // ============================================================
-  // Validation Results
-  // ============================================================
-  await prisma.validationResult.create({
-    data: {
-      jobId: job1.id,
-      isPassed: true,
-      summary: {
-        passed: 500,
-        failed: 0,
-        warnings: 2,
-      },
-      errors: [],
-    },
-  });
-
-  console.log("✅ Created validation results");
-
-  // ============================================================
-  // Visual Templates
-  // ============================================================
-  await prisma.visualTemplate.create({
-    data: {
-      userId: adminUser.id,
-      name: "Standard Report",
-      category: "report",
-      isPublic: true,
-      layoutConfig: {
-        pageSize: "A4",
-        orientation: "portrait",
-        margins: { top: 20, right: 20, bottom: 20, left: 20 },
-        sections: [
-          {
-            id: "header",
-            type: "header",
-            position: { x: 0, y: 0, width: 100, height: 10 },
-          },
-          {
-            id: "body",
-            type: "table",
-            position: { x: 0, y: 10, width: 100, height: 80 },
-          },
-        ],
-      },
-    },
-  });
-
-  await prisma.visualTemplate.create({
-    data: {
-      userId: developerUser.id,
-      name: "Data Summary Card",
-      category: "card",
-      isPublic: false,
-      layoutConfig: {
-        pageSize: "A4",
-        orientation: "landscape",
-        margins: { top: 10, right: 10, bottom: 10, left: 10 },
-      },
-    },
-  });
-
-  console.log("✅ Created visual templates");
+  console.log("✅ Created schema definition");
 
   console.log("\n🎉 Database seeding completed successfully!");
-  console.log(`   Users:              3`);
-  console.log(`   Workspaces:         3`);
-  console.log(`   Schema Definitions: 2`);
-  console.log(`   Generation Jobs:    3`);
-  console.log(`   Validation Results: 1`);
-  console.log(`   Visual Templates:   2`);
+  console.log(`   Login:     ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
+  console.log(`   Workspace: ${workspace.name}`);
+  console.log(`   Schema:    Customers & Orders (customers, orders)`);
 }
 
 main()

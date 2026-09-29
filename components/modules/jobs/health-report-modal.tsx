@@ -8,6 +8,7 @@ import {
   Link2,
   Loader2,
   Percent,
+  Sparkles,
   XCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import {
+  explainErrorsPrompt,
+  useAssistant,
+} from "@/components/modules/assistant/assistant-provider";
 
 // ============================================
 // Types (mirror lib/engine/auditor.ts, serialized by GET /api/jobs/[id]/validate)
@@ -264,6 +269,7 @@ export default function HealthReportModal({ jobId, onClose }: HealthReportModalP
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [showColumns, setShowColumns] = useState(false);
+  const { openAssistant } = useAssistant();
 
   useEffect(() => {
     if (!jobId) return;
@@ -359,13 +365,32 @@ export default function HealthReportModal({ jobId, onClose }: HealthReportModalP
               </div>
 
               <section className="flex flex-col gap-2">
-                <h3 className="text-sm font-semibold">
-                  Issues{" "}
-                  <span className="font-normal text-[var(--color-muted-foreground)]">
-                    ({errorCount} error{errorCount !== 1 && "s"}, {warningCount} warning
-                    {warningCount !== 1 && "s"})
-                  </span>
-                </h3>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">
+                    Issues{" "}
+                    <span className="font-normal text-[var(--color-muted-foreground)]">
+                      ({errorCount} error{errorCount !== 1 && "s"}, {warningCount} warning
+                      {warningCount !== 1 && "s"})
+                    </span>
+                  </h3>
+                  {report.issues.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const prompt = explainErrorsPrompt(
+                          `data health-check issues from job ${jobId}`,
+                          report.issues
+                        );
+                        handleOpenChange(false);
+                        openAssistant({ send: prompt });
+                      }}
+                    >
+                      <Sparkles />
+                      Explain with AI
+                    </Button>
+                  )}
+                </div>
                 {report.issues.length === 0 ? (
                   <p className="flex items-center gap-2 rounded-md border border-[var(--color-border)] p-3 text-sm">
                     <CheckCircle2 className="size-4 text-green-600 dark:text-green-400" />
