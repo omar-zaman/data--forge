@@ -3,11 +3,13 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signInWithCredentials, signInWithProvider } from "@/lib/auth/actions";
+import { getSafeRedirect } from "@/lib/utils/safe-redirect";
 
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") || "/dashboard";
+  // Only same-origin paths are honoured — blocks ?callbackUrl=https://evil.com
+  const callbackUrl = getSafeRedirect(searchParams.get("callbackUrl"));
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -40,7 +42,7 @@ export function LoginForm() {
     setIsLoading(true);
 
     try {
-      await signInWithProvider(provider);
+      await signInWithProvider(provider, callbackUrl);
     } catch (error) {
       setError("OAuth authentication failed");
       setIsLoading(false);

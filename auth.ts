@@ -15,6 +15,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   ...authConfig,
   callbacks: {
+    // Keep authorized + redirect from auth.config.ts (a plain override would drop them)
+    ...authConfig.callbacks,
     async jwt({ token, user, trigger, session }) {
       // Initial sign in
       if (user) {
@@ -46,23 +48,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return session;
     },
 
-    async signIn({ user, account, profile }) {
-      // For OAuth providers, create user if doesn't exist
+    async signIn({ user, account }) {
       if (account?.provider === "google" || account?.provider === "github") {
         if (!user.email) return false;
 
-        const existingUser = await prisma.user.findUnique({
-          where: { email: user.email },
+        // Only refresh profile data for an OAuth account already linked to a
+        // user. This callback runs before Auth.js rejects an unlinked account
+        // (OAuthAccountNotLinked), so matching on email alone would let anyone
+        // with a same-email OAuth identity overwrite the victim's profile.
+        const linkedAccount = await prisma.account.findUnique({
+          where: {
+            provider_providerAccountId: {
+              provider: account.provider,
+              providerAccountId: account.providerAccountId,
+            },
+          },
+          include: { user: true },
         });
 
-        // Update user info from OAuth provider
-        if (existingUser) {
+        if (linkedAccount) {
           await prisma.user.update({
-            where: { id: existingUser.id },
+            where: { id: linkedAccount.userId },
             data: {
-              name: user.name || existingUser.name,
-              image: user.image || existingUser.image,
-              emailVerified: new Date(),
+              name: user.name || linkedAccount.user.name,
+              image: user.image || linkedAccount.user.image,
             },
           });
         }

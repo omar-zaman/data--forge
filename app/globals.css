@@ -14,8 +14,15 @@
   --color-accent-foreground: oklch(9% 0 0);
   --color-destructive: oklch(60% 0.24 25);
   --color-destructive-foreground: oklch(98% 0 0);
-  --color-border: oklch(90% 0 0);
+  --color-border: var(--color-slate-200);
   --color-ring: oklch(60% 0.18 250);
+
+  /* Shadcn surface/field tokens, mapped to the slate palette */
+  --color-input: var(--color-slate-300);
+  --color-card: var(--color-white);
+  --color-card-foreground: var(--color-slate-900);
+  --color-popover: var(--color-white);
+  --color-popover-foreground: var(--color-slate-900);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -32,8 +39,13 @@
     --color-accent-foreground: oklch(98% 0 0);
     --color-destructive: oklch(31% 0.17 25);
     --color-destructive-foreground: oklch(98% 0 0);
-    --color-border: oklch(15% 0 0);
+    --color-border: var(--color-slate-800);
     --color-ring: oklch(60% 0.18 250);
+    --color-input: var(--color-slate-700);
+    --color-card: var(--color-slate-900);
+    --color-card-foreground: var(--color-slate-50);
+    --color-popover: var(--color-slate-900);
+    --color-popover-foreground: var(--color-slate-50);
   }
 }
 

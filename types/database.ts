@@ -32,7 +32,6 @@ export type UpdateUserInput = Prisma.UserUpdateInput;
 export type Workspace = Prisma.WorkspaceGetPayload<{}>;
 export type WorkspaceWithRelations = Prisma.WorkspaceGetPayload<{
   include: {
-    user: true;
     schemaDefinitions: true;
     generationJobs: true;
   };
@@ -159,6 +158,14 @@ export interface LayoutConfig {
   sections?: LayoutSection[];
   fonts?: FontConfig[];
   colors?: ColorPalette;
+  // Document templates (see lib/validations/document-template.ts). When
+  // documentType is set, every key below is required and strictly validated.
+  documentType?: import("@/lib/validations/document-template").DocumentType;
+  mappingKeys?: string[];
+  layoutStyle?: import("@/lib/validations/document-template").DocumentLayoutStyle;
+  currency?: string;
+  branding?: import("@/lib/validations/document-template").DocumentBranding;
+  typography?: import("@/lib/validations/document-template").DocumentTypography;
 }
 
 export interface LayoutSection {

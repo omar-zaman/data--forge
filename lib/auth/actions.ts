@@ -1,9 +1,10 @@
 "use server";
 
 import bcrypt from "bcryptjs";
-import { signIn, signOut } from "@/auth";
+import { auth, signIn, signOut } from "@/auth";
 import prisma from "@/lib/db/prisma";
 import { AuthError } from "next-auth";
+import { getSafeRedirect } from "@/lib/utils/safe-redirect";
 
 /**
  * Server Actions for Authentication
@@ -108,10 +109,14 @@ export async function signInWithCredentials(data: SignInData) {
 /**
  * Sign in with OAuth provider (Google, GitHub)
  */
-export async function signInWithProvider(provider: "google" | "github") {
+export async function signInWithProvider(
+  provider: "google" | "github",
+  callbackUrl?: string
+) {
   try {
     await signIn(provider, {
-      redirectTo: "/dashboard",
+      // Re-validated here: server actions can be invoked with arbitrary input
+      redirectTo: getSafeRedirect(callbackUrl),
     });
   } catch (error) {
     if (error instanceof AuthError) {
@@ -136,14 +141,21 @@ export async function signOutUser() {
 }
 
 /**
- * Update user password (requires current password)
+ * Update the signed-in user's password (requires current password).
+ * The user is taken from the session, never from the caller — server actions
+ * are public endpoints, so a client-supplied userId would allow IDOR.
  */
 export async function updatePassword(
-  userId: string,
   currentPassword: string,
   newPassword: string
 ) {
   try {
+    const session = await auth();
+    const userId = session?.user?.id;
+    if (!userId) {
+      return { error: "You must be signed in to change your password" };
+    }
+
     // Validate input
     if (!currentPassword || !newPassword) {
       return { error: "Both passwords are required" };
@@ -153,13 +165,21 @@ export async function updatePassword(
       return { error: "New password must be at least 8 characters long" };
     }
 
+    if (newPassword === currentPassword) {
+      return { error: "New password must be different from the current one" };
+    }
+
     // Get user
     const user = await prisma.user.findUnique({
       where: { id: userId },
     });
 
-    if (!user || !user.password) {
+    if (!user) {
       return { error: "User not found" };
+    }
+
+    if (!user.password) {
+      return { error: "This account signs in with Google or GitHub and has no password" };
     }
 
     // Verify current password

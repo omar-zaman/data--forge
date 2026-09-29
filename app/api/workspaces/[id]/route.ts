@@ -11,6 +11,7 @@ import {
   updateWorkspace,
   deleteWorkspace,
 } from "@/lib/db/services/workspace-service";
+import { validateObjectId } from "@/lib/utils/validate-object-id";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -28,6 +29,8 @@ export async function GET(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const result = await requireOwnership(id, session.user.id);
   if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (result === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -42,6 +45,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const check = await requireOwnership(id, session.user.id);
   if (!check) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (check === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -70,6 +75,8 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const check = await requireOwnership(id, session.user.id);
   if (!check) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (check === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });

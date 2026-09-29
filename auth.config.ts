@@ -4,6 +4,7 @@ import Google from "next-auth/providers/google";
 import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { getUserByEmail } from "@/lib/db/queries";
+import { getSafeRedirect } from "@/lib/utils/safe-redirect";
 
 /**
  * NextAuth.js v5 Configuration
@@ -17,14 +18,14 @@ export default {
     GitHub({
       clientId: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      allowDangerousEmailAccountLinking: true,
+      allowDangerousEmailAccountLinking: false,
     }),
 
     // Google OAuth Provider
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      allowDangerousEmailAccountLinking: true,
+      allowDangerousEmailAccountLinking: false,
     }),
 
     // Credentials Provider (Email/Password)
@@ -73,13 +74,14 @@ export default {
   callbacks: {
     async authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
-      const isOnDashboard = nextUrl.pathname.startsWith("/dashboard");
-      const isOnProjects = nextUrl.pathname.startsWith("/projects");
+      const isProtected = /^\/(dashboard|workspace|projects|settings)(\/|$)/.test(
+        nextUrl.pathname
+      );
       const isOnAuth = nextUrl.pathname.startsWith("/login") || 
                        nextUrl.pathname.startsWith("/register");
 
-      // Protect dashboard and projects routes
-      if (isOnDashboard || isOnProjects) {
+      // Protect app routes (kept in sync with PROTECTED_ROUTE in proxy.ts)
+      if (isProtected) {
         if (isLoggedIn) return true;
         return false; // Redirect to login page
       }
@@ -90,6 +92,21 @@ export default {
       }
 
       return true;
+    },
+
+    // Blocks open redirects through Auth.js's own ?callbackUrl= handling:
+    // only same-origin destinations are allowed
+    async redirect({ url, baseUrl }) {
+      if (url.startsWith("/")) return `${baseUrl}${getSafeRedirect(url, "/")}`;
+      try {
+        const target = new URL(url);
+        if (target.origin === new URL(baseUrl).origin) {
+          return `${baseUrl}${getSafeRedirect(target.pathname + target.search + target.hash, "/")}`;
+        }
+      } catch {
+        // Malformed URL — fall through to the default
+      }
+      return `${baseUrl}/dashboard`;
     },
   },
 } satisfies NextAuthConfig;

@@ -154,6 +154,15 @@ export async function listSchemas(
   });
 }
 
+/**
+ * Number of generation jobs that reference a schema. A schema with jobs is
+ * immutable: its exports must stay reproducible from the stored definition,
+ * so changes go into a new version instead.
+ */
+export async function countSchemaJobs(schemaId: string): Promise<number> {
+  return prisma.generationJob.count({ where: { schemaId } });
+}
+
 export async function updateSchema(
   id: string,
   data: Partial<{
@@ -186,10 +195,24 @@ export async function updateSchema(
   });
 }
 
+/**
+ * Deletes a schema definition together with its generation jobs (and their
+ * validation results). GenerationJob.schema is `onDelete: Restrict`, so the
+ * jobs must be removed first or the delete fails with a relation violation.
+ */
 export async function deleteSchema(id: string): Promise<SchemaDefinition> {
-  return prisma.schemaDefinition.delete({
-    where: { id },
+  const jobs = await prisma.generationJob.findMany({
+    where: { schemaId: id },
+    select: { id: true },
   });
+  const jobIds = jobs.map((j) => j.id);
+
+  const [, , deleted] = await prisma.$transaction([
+    prisma.validationResult.deleteMany({ where: { jobId: { in: jobIds } } }),
+    prisma.generationJob.deleteMany({ where: { id: { in: jobIds } } }),
+    prisma.schemaDefinition.delete({ where: { id } }),
+  ]);
+  return deleted;
 }
 
 // ============================================

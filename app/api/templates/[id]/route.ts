@@ -13,6 +13,7 @@ import {
   validateLayoutConfig,
 } from "@/lib/db/services/visual-template-service";
 import type { LayoutConfig } from "@/types/database";
+import { validateObjectId } from "@/lib/utils/validate-object-id";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -30,6 +31,8 @@ export async function GET(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const template = await getTemplate(id);
   if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -48,6 +51,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const template = await resolveAndAuthorize(id, session.user.id);
   if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (template.userId !== session.user.id) {
@@ -91,6 +96,8 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   }
 
   const { id } = await params;
+  const invalidId = validateObjectId(id);
+  if (invalidId) return invalidId;
   const template = await getTemplate(id);
   if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (template.userId !== session.user.id) {

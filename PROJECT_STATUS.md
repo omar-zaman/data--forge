@@ -137,6 +137,44 @@
 **Seed Data**
 - ✅ `lib/db/seed.ts` rewritten for new schema (3 users, 3 workspaces, 2 schemas, 3 jobs, 1 validation, 2 templates)
 
+### Phase 4.1: Document Engine, PDF Export & Visual Templates ✅
+
+**Template contract** — `lib/validations/document-template.ts`
+- Document types `invoice` / `statement`, each with a fixed set of mapping keys (header keys from the
+  header table, line keys from a child table with an FK to it); required keys are always included
+- `layoutConfig` for document templates: `documentType`, `mappingKeys`, `layoutStyle`
+  (classic / modern / minimal), `currency`, `branding` (companyName, logoUrl, address, footerText),
+  `typography` (Helvetica / Times-Roman / Courier, 8–14 pt), `colors.primary` (+ secondary/accent/text)
+- `validateLayoutConfig` is now strict: unknown top-level keys are rejected, and document fields are
+  validated in full whenever `documentType` is set
+- Presets (Classic Invoice, Modern Invoice, Bank Statement), mapping validation and column auto-suggest
+
+**Template Gallery** — `/templates` (`app/(protected)/templates/page.tsx`,
+`components/modules/templates/template-gallery.tsx`)
+- CSS-drawn layout thumbnails, preset starting points, Invoice/Statement filter
+- Editor dialog with live preview: branding, colour pickers, font, currency, page size, optional mapping keys, public sharing
+- Edit / duplicate / delete own templates; duplicate other users' public templates
+- Linked from the dashboard header and the Documents tab
+
+**Documents tab** — `components/modules/documents/document-workspace.tsx`
+- Pick a schema version, the header table (one document per row) and a child line-item table
+- Visual template picker; mapping canvas (`orders.total_amount → Invoice Total`) with auto-map,
+  required-field checks and hints for what unmapped optional fields do
+- Queues a document job (1–500 documents, optional seed); shared Job History with PDF download
+
+**Pipeline**
+- `GenerationJob.documentConfig Json?` (new): template snapshot + mapping, set by `POST /api/jobs`
+  when the body carries `document: { templateId, mapping }` (validated against template and schema)
+- `lib/queue/worker.ts` routes jobs with `documentConfig` to `processDocumentJob`
+- `lib/engine/document-engine.ts`: in-memory relational generation, header ↔ line binding via FK,
+  invoice totals (computed when unmapped), statement ledgers with running balances, safe logo fetch
+  (https, public IPs only, no redirects, ≤ 2 MB, PNG/JPEG)
+- `lib/engine/pdf-engine.tsx`: React-PDF components (one `<Page>` per document, repeated table
+  headers, page footers); `renderToStream` → Buffer → `uploadBuffer` (`lib/storage/s3.ts`) → presigned `exportUrl`
+- `@react-pdf/renderer` is ESM-only, so the worker loads it with a native dynamic `import()`;
+  it is also listed in `serverExternalPackages`
+- `/api/jobs/[id]/download?format=pdf`; the Job History table shows "N invoices" and a Download PDF button
+
 ---
 
 ## 🔜 Active Spec — Phase 2.1: Workspace Schema Designer
@@ -350,10 +388,11 @@ npx tsx scripts/rollback-migration.ts <backupTimestamp>
 - [ ] Per-column type + constraint enforcement
 - [ ] Bulk export (CSV, JSON, SQL)
 
-### Phase 4: Template System (Proposed)
-- [ ] PDF rendering from VisualTemplate layouts
-- [ ] Template marketplace (public sharing)
-- [ ] Real-time preview
+### Phase 4: Template System
+- [x] PDF rendering from VisualTemplate layouts (Phase 4.1)
+- [x] Public sharing + duplication of templates (Phase 4.1)
+- [x] Live layout preview in the template editor (Phase 4.1)
+- [ ] Commerce-oriented column types (product name, price, quantity) for more realistic invoices
 
 ---
 
