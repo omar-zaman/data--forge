@@ -336,6 +336,14 @@ npm run db:seed
 npm run dev
 ```
 
+### Local job services (Redis + S3)
+- `npm run services` starts both (`scripts/dev-services.ts`); keep it running next to `npm run dev` and `npm run worker`
+- Redis 8.10.2 portable Windows build in `.services/redis/` → `REDIS_URL=redis://127.0.0.1:6379`
+- S3-compatible storage via `s3rver` (dev dependency) → `S3_ENDPOINT=http://127.0.0.1:4568`, bucket
+  `dataforge-exports` auto-created, fixed credentials `S3RVER`/`S3RVER`, path-style URLs
+- Data lives in `.services/redis-data` and `.services/s3-data`; `.services/` is gitignored
+  (MinIO no longer publishes community binaries, and Windows Application Control blocks unsigned SeaweedFS)
+
 ### Migration (existing database)
 ```bash
 # 1. Back up first

@@ -49,6 +49,24 @@
   }
 }
 
+/* Sheet (drawer) slide animations — used by components/ui/sheet.tsx */
+@keyframes sheet-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes sheet-out-right {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@keyframes sheet-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes sheet-out-left {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);

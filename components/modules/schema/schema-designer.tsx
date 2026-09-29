@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -8,8 +8,14 @@ import {
   ArrowDown,
   Loader2,
   RefreshCcw,
+  Sparkles,
   Trash2,
 } from "lucide-react";
+import { useAssistant } from "@/components/modules/assistant/assistant-provider";
+import {
+  proposalToTableStructures,
+  type SchemaProposal,
+} from "@/lib/ai/assistant-tools";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -536,6 +542,47 @@ export default function SchemaDesigner({
     [tables]
   );
 
+  // ============================================
+  // AI assistant — shares the live draft and accepts generated schemas
+  // ============================================
+
+  const { openAssistant, registerSchemaTarget } = useAssistant();
+
+  useEffect(
+    () =>
+      registerSchemaTarget({
+        getSnapshot: () => ({
+          name: schemaName.trim(),
+          dataType,
+          tables: isRelational
+            ? tableDraftsToTableStructures(tables)
+            : [
+                columnRowsToTableStructure(
+                  sanitizeColumnName(schemaName.trim()) || "table",
+                  tables[0].columns
+                ),
+              ],
+        }),
+        apply: (proposal: SchemaProposal) => {
+          const drafts = initialTablesFrom({
+            id: "",
+            name: proposal.schemaName,
+            dataType: proposal.dataType,
+            tables: proposalToTableStructures(proposal),
+          });
+          setTables(drafts);
+          setActiveTableId(drafts[0].id);
+          setDataType(proposal.dataType);
+          // Keep the name of an already-saved schema; name new drafts
+          if (!existingSchemaId || !schemaName.trim()) setSchemaName(proposal.schemaName);
+          toast.success("AI schema applied", {
+            description: "Review the columns, then press Save Schema.",
+          });
+        },
+      }),
+    [registerSchemaTarget, schemaName, dataType, isRelational, tables, existingSchemaId]
+  );
+
   const tabSummaries: TableTabSummary[] = tables.map((t) => ({
     id: t.id,
     name: t.name,
@@ -821,6 +868,19 @@ export default function SchemaDesigner({
             </SelectContent>
           </Select>
         </div>
+        <Button
+          variant="outline"
+          onClick={() =>
+            openAssistant({
+              draft: tables.some((t) => t.columns.some((c) => c.name))
+                ? "Update my current schema: "
+                : "Design a schema for ",
+            })
+          }
+        >
+          <Sparkles />
+          Generate with AI
+        </Button>
       </div>
 
       {/* Tables toolbar + active table name */}

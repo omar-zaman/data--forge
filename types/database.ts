@@ -14,7 +14,7 @@ export { UserRole, JobStatus, DataType } from "@prisma/client";
 // User Types
 // ============================================
 
-export type User = Prisma.UserGetPayload<{}>;
+export type User = Prisma.UserGetPayload<Record<string, never>>;
 export type UserWithRelations = Prisma.UserGetPayload<{
   include: {
     workspaces: true;
@@ -29,7 +29,7 @@ export type UpdateUserInput = Prisma.UserUpdateInput;
 // Workspace Types
 // ============================================
 
-export type Workspace = Prisma.WorkspaceGetPayload<{}>;
+export type Workspace = Prisma.WorkspaceGetPayload<Record<string, never>>;
 export type WorkspaceWithRelations = Prisma.WorkspaceGetPayload<{
   include: {
     schemaDefinitions: true;
@@ -50,7 +50,7 @@ export type UpdateWorkspaceInput = Prisma.WorkspaceUpdateInput;
 // Schema Definition Types
 // ============================================
 
-export type SchemaDefinition = Prisma.SchemaDefinitionGetPayload<{}>;
+export type SchemaDefinition = Prisma.SchemaDefinitionGetPayload<Record<string, never>>;
 export type SchemaDefinitionWithRelations = Prisma.SchemaDefinitionGetPayload<{
   include: {
     workspace: true;
@@ -103,7 +103,7 @@ export interface ColumnConstraint {
 // Generation Job Types
 // ============================================
 
-export type GenerationJob = Prisma.GenerationJobGetPayload<{}>;
+export type GenerationJob = Prisma.GenerationJobGetPayload<Record<string, never>>;
 export type GenerationJobWithRelations = Prisma.GenerationJobGetPayload<{
   include: {
     workspace: true;
@@ -119,7 +119,7 @@ export type UpdateGenerationJobInput = Prisma.GenerationJobUpdateInput;
 // Validation Result Types
 // ============================================
 
-export type ValidationResult = Prisma.ValidationResultGetPayload<{}>;
+export type ValidationResult = Prisma.ValidationResultGetPayload<Record<string, never>>;
 export type ValidationResultWithJob = Prisma.ValidationResultGetPayload<{
   include: { job: true };
 }>;
@@ -138,7 +138,7 @@ export interface ValidationError {
 // Visual Template Types
 // ============================================
 
-export type VisualTemplate = Prisma.VisualTemplateGetPayload<{}>;
+export type VisualTemplate = Prisma.VisualTemplateGetPayload<Record<string, never>>;
 export type VisualTemplateWithUser = Prisma.VisualTemplateGetPayload<{
   include: { user: true };
 }>;

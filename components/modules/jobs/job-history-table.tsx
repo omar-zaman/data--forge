@@ -13,6 +13,7 @@ import {
   ShieldCheck,
   ShieldX,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import {
+  explainErrorsPrompt,
+  useAssistant,
+} from "@/components/modules/assistant/assistant-provider";
 import HealthReportModal, {
   HEALTH_BADGE_CLASS,
   type HealthLevel,
@@ -560,6 +565,7 @@ export default function JobHistoryTable({
 }: JobHistoryTableProps) {
   const [errorJob, setErrorJob] = useState<JobRow | null>(null);
   const [healthJobId, setHealthJobId] = useState<string | null>(null);
+  const { openAssistant } = useAssistant();
   const activeCount = jobs.filter((j) => isActive(j.status)).length;
   const errors = errorJob ? normalizeErrors(errorJob.validationErrors) : [];
 
@@ -680,6 +686,24 @@ export default function JobHistoryTable({
                 </li>
               ))}
             </ul>
+          )}
+          {errors.length > 0 && errorJob && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="self-start"
+              onClick={() => {
+                const prompt = explainErrorsPrompt(
+                  `errors from failed generation job ${errorJob.id}`,
+                  errors
+                );
+                setErrorJob(null);
+                openAssistant({ send: prompt });
+              }}
+            >
+              <Sparkles />
+              Explain with AI
+            </Button>
           )}
         </DialogContent>
       </Dialog>

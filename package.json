@@ -8,13 +8,18 @@
     "start": "next start",
     "lint": "eslint",
     "worker": "tsx lib/queue/worker.ts",
+    "services": "tsx scripts/dev-services.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "db:reset": "prisma db push --force-reset"
+    "db:reset": "prisma db push --force-reset",
+    "db:check": "tsx scripts/check-db.ts",
+    "db:setup": "prisma generate && prisma db push && tsx scripts/check-db.ts && prisma db seed"
   },
   "dependencies": {
+    "@ai-sdk/google": "^4.0.85",
+    "@ai-sdk/react": "^4.0.125",
     "@auth/prisma-adapter": "^2.11.3",
     "@aws-sdk/client-s3": "^3.1143.0",
     "@aws-sdk/s3-request-presigner": "^3.1143.0",
@@ -28,6 +33,7 @@
     "@radix-ui/react-switch": "^1.3.7",
     "@radix-ui/react-tabs": "^1.1.21",
     "@react-pdf/renderer": "^4.9.0",
+    "ai": "^7.0.122",
     "archiver": "^8.0.0",
     "bcryptjs": "^3.0.3",
     "bullmq": "^6.3.10",
@@ -39,6 +45,7 @@
     "next-auth": "^5.0.0-beta.32",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.7.0"
   },
@@ -52,6 +59,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.7",
     "prisma": "^5.22.0",
+    "s3rver": "^3.7.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"
