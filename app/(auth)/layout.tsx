@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 /**
  * Auth Layout
@@ -17,5 +18,10 @@ export default async function AuthLayout({
     redirect("/dashboard");
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      <ThemeToggle className="fixed top-3 right-3 z-40" />
+      {children}
+    </>
+  );
 }

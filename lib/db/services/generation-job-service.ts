@@ -26,7 +26,7 @@ import type {
   PaginationParams,
   PaginatedResponse,
 } from "@/types/database";
-import { JobStatus } from "@prisma/client";
+import { ExportFormat, JobStatus } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { TabularEngineError, randomSeed } from "@/lib/engine/tabular-engine";
 import { resolveFakerLocale } from "@/lib/engine/locale";
@@ -48,6 +48,7 @@ import {
   publishJobExport,
   removeJobStaging,
   sanitizeFileName,
+  type ExportFileFormat,
   type SqlDumpWriter,
   type SqlTable,
   type TableExportWriter,
@@ -258,6 +259,34 @@ function csvFileBases(tables: PlannedTable[]): string[] {
   });
 }
 
+/** Rows per table printed in the PDF report (the full data stays in CSV/JSON/SQL). */
+export const PDF_REPORT_MAX_ROWS = 500;
+
+export interface PdfReportTable {
+  name: string;
+  columns: string[];
+  rows: (string | number | boolean | null | undefined)[][];
+  totalRows: number;
+}
+
+/**
+ * Renders the PDF report for jobs that request ExportFormat.PDF. Injected by
+ * the worker so @react-pdf/renderer never ends up in the Next.js route bundles.
+ */
+export type PdfReportRenderer = (input: {
+  title: string;
+  subtitle?: string;
+  tables: PdfReportTable[];
+}) => Promise<Buffer>;
+
+export interface ProcessJobOptions {
+  renderPdfReport?: PdfReportRenderer;
+}
+
+export function exportFormatToFile(format: ExportFormat | null | undefined): ExportFileFormat | undefined {
+  return format ? (format.toLowerCase() as ExportFileFormat) : undefined;
+}
+
 /**
  * Execute a queued job (called by the BullMQ worker): generate rows in batches,
  * stream them to local staging files (CSV, JSON, SQL) while auditing them in
@@ -272,7 +301,8 @@ function csvFileBases(tables: PlannedTable[]): string[] {
  */
 export async function processJob(
   id: string,
-  userId: string
+  userId: string,
+  options: ProcessJobOptions = {}
 ): Promise<GenerationJob> {
   const job = await prisma.generationJob.findUnique({
     where: { id },
@@ -326,6 +356,12 @@ export async function processJob(
     const locale = resolveFakerLocale(job.locale);
     const pools: KeyPools = new Map();
     let lastProgress = 0;
+    // PDF jobs keep a leading sample of every table for the report
+    const wantsPdf = job.exportFormat === ExportFormat.PDF;
+    if (wantsPdf && !options.renderPdfReport) {
+      throw new ExportError("PDF export is only available when the job runs in the worker.");
+    }
+    const reportTables: PdfReportTable[] = [];
 
     for (const [position, table] of plan.tables.entries()) {
       const writer = await createTableExportWriter(id, fileBases[position], table.columns);
@@ -342,6 +378,10 @@ export async function processJob(
         { rowCount, maxRows: JOB_MAX_ROW_COUNT, locale }
       );
       const tableRows = generator.rowCount;
+      const reportTable: PdfReportTable | null = wantsPdf
+        ? { name: table.name, columns: table.columns.map((c) => c.name), rows: [], totalRows: tableRows }
+        : null;
+      if (reportTable) reportTables.push(reportTable);
 
       for (let offset = 0; offset < tableRows; offset += JOB_BATCH_SIZE) {
         const size = Math.min(JOB_BATCH_SIZE, tableRows - offset);
@@ -350,6 +390,11 @@ export async function processJob(
         await jsonWriter.writeBatch(rows);
         await sqlWriter.writeBatch(table.name, rows);
         auditor.observe(table.name, rows);
+        if (reportTable && reportTable.rows.length < PDF_REPORT_MAX_ROWS) {
+          for (const row of rows.slice(0, PDF_REPORT_MAX_ROWS - reportTable.rows.length)) {
+            reportTable.rows.push(table.columns.map((c) => row[c.key]));
+          }
+        }
 
         // Child row counts aren't known until their parents exist, so each
         // table is an equal share of the bar. Keep 100 reserved for completion.
@@ -371,18 +416,35 @@ export async function processJob(
     await updateJobStatus(id, JobStatus.VALIDATING, 99);
     const report = auditor.finalize();
 
+    const primaryFormat = exportFormatToFile(job.exportFormat);
+    const pdf =
+      wantsPdf && options.renderPdfReport
+        ? await options.renderPdfReport({
+            title: `${schema.name} v${schema.version}`,
+            subtitle: `Generated ${new Date().toUTCString()} · seed ${baseSeed} · ${plan.tables.length} table${plan.tables.length === 1 ? "" : "s"}`,
+            tables: reportTables,
+          })
+        : undefined;
+
     // exportUrl points at the CSV (single table) or dataset.zip (CSV + JSON + SQL);
     // every file sits under the job's prefix and is served by /api/jobs/[id]/download
-    const { primary } = await publishJobExport(
+    const { primary, files } = await publishJobExport(
       job.workspaceId,
       id,
       `${schema.name}_v${schema.version}`,
       writers,
       sqlWriter,
-      jsonWriters
+      jsonWriters,
+      { primaryFormat, pdf }
     );
     await validateJob(id, report);
-    return await completeJob(id, primary.url, primary.sizeBytes, report.passed);
+    return await completeJob(
+      id,
+      primary.url,
+      primary.sizeBytes,
+      report.passed,
+      files.map((f) => f.format)
+    );
   } catch (error) {
     await Promise.allSettled([
       ...writers.map((w) => w.abort()),
@@ -552,7 +614,8 @@ export async function completeJob(
   id: string,
   exportUrl: string,
   fileSizeBytes?: number,
-  healthCheckPassed?: boolean
+  healthCheckPassed?: boolean,
+  exportFiles?: ExportFileFormat[]
 ): Promise<GenerationJob> {
   try {
     return await prisma.generationJob.update({
@@ -564,6 +627,7 @@ export async function completeJob(
         exportUrl,
         ...(fileSizeBytes !== undefined && { fileSizeBytes }),
         ...(healthCheckPassed !== undefined && { healthCheckPassed }),
+        ...(exportFiles && { exportFiles: [...new Set(exportFiles)] }),
       },
     });
   } catch (error) {

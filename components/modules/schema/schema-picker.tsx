@@ -112,7 +112,6 @@ export default function SchemaPicker({
         variant="outline"
         size="sm"
         onClick={onCreate}
-        disabled={isDraft}
         className="mt-1"
       >
         <Plus />

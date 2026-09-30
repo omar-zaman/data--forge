@@ -847,6 +847,7 @@ export default function SchemaDesigner({
           <Input
             id="schema-name"
             placeholder="e.g. customers"
+            autoComplete="off"
             value={schemaName}
             onChange={(e) => setSchemaName(e.target.value)}
           />
@@ -967,7 +968,7 @@ export default function SchemaDesigner({
             return (
               <div
                 key={row.id}
-                className="flex flex-col gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2"
+                className="flex flex-col gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2"
               >
                 <div className="grid grid-cols-[1fr_160px_120px_80px_60px_60px_auto] items-center gap-3">
                   {/* Name + relationship badge */}

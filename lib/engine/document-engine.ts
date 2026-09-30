@@ -16,6 +16,7 @@ import prisma from "@/lib/db/prisma";
 import type { GenerationJob, TableStructure } from "@/types/database";
 import {
   completeJob,
+  exportFormatToFile,
   failJob,
   getJob,
 } from "@/lib/db/services/generation-job-service";
@@ -28,8 +29,13 @@ import {
   type KeyPools,
 } from "@/lib/engine/relational-engine";
 import { resolveFakerLocale } from "@/lib/engine/locale";
-import { deleteJobExports, sanitizeFileName } from "@/lib/engine/exporter";
-import { StorageError, jobExportPrefix, presignDownloadUrl, uploadBuffer } from "@/lib/storage/s3";
+import {
+  ExportError,
+  deleteJobExports,
+  publishDocumentExport,
+  removeJobStaging,
+} from "@/lib/engine/exporter";
+import { StorageError } from "@/lib/storage/s3";
 import {
   DOCUMENT_DEFAULT_COUNT,
   DOCUMENT_MAX_COUNT,
@@ -42,6 +48,7 @@ import {
 } from "@/lib/validations/document-template";
 import {
   renderDocumentPdf,
+  renderEachDocumentPdf,
   type DocumentModel,
   type InvoiceItem,
   type PdfLayout,
@@ -445,23 +452,43 @@ export async function processDocumentJob(id: string, userId: string): Promise<Ge
     });
     await setProgress(id, 60);
 
-    // ---- 3. Render the PDF (60–90%) ----
+    // ---- 3. Render the combined PDF (60–70%) and one PDF per document (70–90%) ----
+    // The logo is fetched once (5 s timeout) and the fonts are PDF built-ins, so
+    // rendering never waits on the network
     const logo = await fetchLogo(layout.branding.logoUrl);
-    const pdf = await renderDocumentPdf({
+    const renderInput = {
       title: `${config.template.name} — ${schema.name} v${schema.version}`,
       layout,
       documents,
       logo,
       keys: new Set(layout.mappingKeys),
-    });
+    };
+    const pdf = await renderDocumentPdf(renderInput);
+    await setProgress(id, 70);
+
+    let lastProgress = 70;
+    const singles =
+      documents.length > 1
+        ? await renderEachDocumentPdf(renderInput, async (done) => {
+            const progress = 70 + Math.floor((done / documents.length) * 20);
+            if (progress !== lastProgress) {
+              lastProgress = progress;
+              await setProgress(id, progress);
+            }
+          })
+        : [];
     await setProgress(id, 90);
 
-    // ---- 4. Publish (90–100%) ----
-    const fileName = `${sanitizeFileName(`${schema.name}_${layout.documentType}s`, "documents")}.pdf`;
-    const key = `${jobExportPrefix(job.workspaceId, id)}${fileName}`;
-    const sizeBytes = await uploadBuffer(key, pdf, "application/pdf", fileName);
-    const url = await presignDownloadUrl(key);
-    return await completeJob(id, url, sizeBytes);
+    // ---- 4. Publish the PDF (+ ZIP of per-document PDFs) (90–100%) ----
+    const { primary, files } = await publishDocumentExport(
+      job.workspaceId,
+      id,
+      `${schema.name}_${layout.documentType}s`,
+      pdf,
+      singles.map((data, i) => ({ name: documentFileName(documents[i], i), data })),
+      exportFormatToFile(job.exportFormat)
+    );
+    return await completeJob(id, primary.url, primary.sizeBytes, undefined, files.map((f) => f.format));
   } catch (error) {
     // Covers partial uploads and jobs deleted mid-run (completeJob → not found)
     await deleteJobExports(job.workspaceId, id).catch((cleanupError) => {
@@ -478,11 +505,19 @@ export async function processDocumentJob(id: string, userId: string): Promise<Ge
             ? "GENERATION_ERROR"
             : error instanceof DocumentEngineError
               ? "DOCUMENT_ERROR"
-              : error instanceof StorageError
+              : error instanceof StorageError || error instanceof ExportError
                 ? "EXPORT_ERROR"
                 : "PDF_RENDER_ERROR",
         ...(error instanceof TabularEngineError && error.column && { field: error.column }),
       },
     ]);
+  } finally {
+    await removeJobStaging(id).catch(() => undefined);
   }
+}
+
+/** "invoice_INV-00012" / "statement_1234567890" for the entries of the ZIP. */
+function documentFileName(doc: DocumentModel, index: number): string {
+  const id = doc.kind === "invoice" ? doc.number : doc.accountNumber;
+  return `${doc.kind}_${String(index + 1).padStart(3, "0")}_${id}`;
 }

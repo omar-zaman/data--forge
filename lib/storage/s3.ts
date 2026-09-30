@@ -157,6 +157,24 @@ export async function presignDownloadUrl(
   });
 }
 
+export interface StoredObject {
+  body: ReadableStream<Uint8Array>;
+  contentType?: string;
+  contentLength?: number;
+}
+
+/** Opens a private object for streaming through the app (no presigned URL needed by the browser). */
+export async function getObjectStream(key: string): Promise<StoredObject> {
+  const { client, bucket } = getStorage();
+  const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!result.Body) throw new StorageError(`Object "${key}" has no body`);
+  return {
+    body: result.Body.transformToWebStream() as ReadableStream<Uint8Array>,
+    contentType: result.ContentType,
+    contentLength: result.ContentLength,
+  };
+}
+
 /** Seconds until a SigV4 presigned URL expires, or null if it isn't one. */
 function presignedSecondsRemaining(url: URL): number | null {
   const date = url.searchParams.get("X-Amz-Date");

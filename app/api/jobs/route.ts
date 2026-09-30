@@ -2,9 +2,14 @@
  * GET  /api/jobs?workspaceId=  – list generation jobs for a workspace the caller owns
  *                                (workspaceId is required; optional filters)
  * POST /api/jobs               – create a new generation job and add it to the BullMQ
- *                                queue (response returns immediately). With
+ *                                queue (response returns immediately). Optional
+ *                                `exportFormat` (CSV | JSON | SQL | PDF | ZIP) picks
+ *                                the primary download. With
  *                                `document: { templateId, mapping }` the worker
- *                                renders the data into a PDF instead.
+ *                                renders the data into a PDF instead. Optional
+ *                                `templateId` (PDF exports only) styles the PDF
+ *                                report with one of the caller's visual templates;
+ *                                omitted/null uses the default layout.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -19,7 +24,7 @@ import {
   withFreshExportUrl,
 } from "@/lib/db/services/generation-job-service";
 import { enqueueGenerationJob } from "@/lib/queue/client";
-import { JobStatus } from "@prisma/client";
+import { ExportFormat, JobStatus } from "@prisma/client";
 import { validateObjectId } from "@/lib/utils/validate-object-id";
 import { getTemplate } from "@/lib/db/services/visual-template-service";
 import { parseTables } from "@/lib/db/services/schema-definition-service";
@@ -96,8 +101,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { workspaceId, schemaId, rowCount, seed, locale, document } = body as {
+  const { workspaceId, schemaId, rowCount, seed, locale, document, exportFormat, templateId } = body as {
     workspaceId?: string;
+    /** Visual template for the PDF report of data jobs; null/omitted → default layout. */
+    templateId?: string | null;
+    exportFormat?: string;
     schemaId?: string;
     rowCount?: number;
     seed?: number;
@@ -130,6 +138,41 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
+  if (
+    exportFormat !== undefined &&
+    !Object.values(ExportFormat).includes(exportFormat as ExportFormat)
+  ) {
+    return NextResponse.json(
+      { error: `exportFormat must be one of: ${Object.values(ExportFormat).join(", ")}` },
+      { status: 400 }
+    );
+  }
+  // Document jobs only produce PDFs (and a ZIP of per-document PDFs)
+  if (
+    document !== undefined &&
+    exportFormat !== undefined &&
+    exportFormat !== ExportFormat.PDF &&
+    exportFormat !== ExportFormat.ZIP
+  ) {
+    return NextResponse.json(
+      { error: "Document jobs support only the PDF and ZIP export formats" },
+      { status: 400 }
+    );
+  }
+  if (templateId !== undefined && templateId !== null) {
+    if (typeof templateId !== "string") {
+      return NextResponse.json({ error: "templateId must be a string" }, { status: 400 });
+    }
+    const invalidTemplateId = validateObjectId(templateId, "templateId");
+    if (invalidTemplateId) return invalidTemplateId;
+    // Document jobs carry their template in `document`; data jobs only style the PDF report
+    if (document !== undefined || exportFormat !== ExportFormat.PDF) {
+      return NextResponse.json(
+        { error: "templateId is only supported for PDF exports of data jobs" },
+        { status: 400 }
+      );
+    }
+  }
   if (seed !== undefined && !Number.isInteger(seed)) {
     return NextResponse.json({ error: "seed must be an integer" }, { status: 400 });
   }
@@ -152,6 +195,13 @@ export async function POST(req: NextRequest) {
   const schema = await getSchema(schemaId);
   if (!schema || schema.workspaceId !== workspaceId) {
     return NextResponse.json({ error: "Schema not found" }, { status: 404 });
+  }
+
+  if (typeof templateId === "string") {
+    const reportTemplate = await getTemplate(templateId);
+    if (!reportTemplate || reportTemplate.userId !== session.user.id) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
   }
 
   // Document jobs snapshot the template, so later template edits never change a queued job
@@ -220,6 +270,10 @@ export async function POST(req: NextRequest) {
     ...(rowCount !== undefined && { rowCount }),
     ...(seed !== undefined && { seed }),
     ...(locale !== undefined && { locale }),
+    ...(typeof templateId === "string" && { template: { connect: { id: templateId } } }),
+    exportFormat:
+      (exportFormat as ExportFormat | undefined) ??
+      (documentConfig ? ExportFormat.PDF : undefined),
   });
 
   // Processed by the BullMQ worker; progress is polled via /api/jobs/[id]/progress

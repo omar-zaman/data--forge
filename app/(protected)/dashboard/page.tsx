@@ -158,52 +158,6 @@ export default async function DashboardPage() {
           )}
         </div>
 
-        {/* Quick reference */}
-        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-3">
-            Available API Endpoints
-          </h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-blue-800 dark:text-blue-200">
-            <div>
-              <p className="font-medium mb-1">Workspaces</p>
-              <ul className="space-y-0.5 font-mono text-xs">
-                <li>GET  /api/workspaces</li>
-                <li>POST /api/workspaces</li>
-                <li>GET  /api/workspaces/[id]</li>
-                <li>PATCH /api/workspaces/[id]</li>
-                <li>DELETE /api/workspaces/[id]</li>
-              </ul>
-            </div>
-            <div>
-              <p className="font-medium mb-1">Schemas</p>
-              <ul className="space-y-0.5 font-mono text-xs">
-                <li>GET  /api/schemas?workspaceId=</li>
-                <li>POST /api/schemas</li>
-                <li>GET  /api/schemas/[id]/versions</li>
-                <li>POST /api/schemas/[id]/versions</li>
-              </ul>
-            </div>
-            <div>
-              <p className="font-medium mb-1">Generation Jobs</p>
-              <ul className="space-y-0.5 font-mono text-xs">
-                <li>GET  /api/jobs?workspaceId=</li>
-                <li>POST /api/jobs</li>
-                <li>GET  /api/jobs/[id]/progress</li>
-                <li>POST /api/jobs/[id]/validate</li>
-              </ul>
-            </div>
-            <div>
-              <p className="font-medium mb-1">Templates</p>
-              <ul className="space-y-0.5 font-mono text-xs">
-                <li>GET  /api/templates</li>
-                <li>GET  /api/templates?public=true</li>
-                <li>POST /api/templates</li>
-                <li>PATCH /api/templates/[id]</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
       </div>
     </div>
   );
