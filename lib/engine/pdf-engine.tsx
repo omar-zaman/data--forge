@@ -8,8 +8,13 @@
  * pages with the column header repeated.
  */
 
+import type { ReactElement } from "react";
 import type * as ReactPdf from "@react-pdf/renderer";
-import type { DocumentLayoutFields } from "@/lib/validations/document-template";
+import {
+  PDF_FONT_FAMILIES,
+  type DocumentLayoutFields,
+  type PdfFontFamily,
+} from "@/lib/validations/document-template";
 
 // @react-pdf/renderer is ESM-only (its sub-packages export only an "import"
 // condition), while the worker runs as CommonJS under tsx. A native dynamic
@@ -477,13 +482,249 @@ function DocumentSet({ title, layout, documents, logo, keys }: RenderPdfInput) {
   );
 }
 
-/** Renders every document into one PDF, collecting the React-PDF stream into a buffer. */
-export async function renderDocumentPdf(input: RenderPdfInput): Promise<Buffer> {
+async function renderToBuffer(element: ReactElement<ReactPdf.DocumentProps>): Promise<Buffer> {
   const { renderToStream } = await loadReactPdf();
-  const stream = await renderToStream(<DocumentSet {...input} />);
+  const stream = await renderToStream(element);
   const chunks: Buffer[] = [];
   for await (const chunk of stream as AsyncIterable<Buffer | string>) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks);
+}
+
+/** Renders every document into one PDF, collecting the React-PDF stream into a buffer. */
+export async function renderDocumentPdf(input: RenderPdfInput): Promise<Buffer> {
+  await loadReactPdf();
+  return renderToBuffer(<DocumentSet {...input} />);
+}
+
+/**
+ * Renders each document into its own PDF (for the per-document ZIP). Yields
+ * between documents so the worker keeps renewing its queue lock.
+ */
+export async function renderEachDocumentPdf(
+  input: RenderPdfInput,
+  onProgress?: (done: number) => Promise<void> | void
+): Promise<Buffer[]> {
+  await loadReactPdf();
+  const buffers: Buffer[] = [];
+  for (const doc of input.documents) {
+    buffers.push(await renderToBuffer(<DocumentSet {...input} documents={[doc]} />));
+    await onProgress?.(buffers.length);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return buffers;
+}
+
+// ============================================
+// Dataset report (data jobs exported as PDF)
+// ============================================
+
+export type ReportCell = string | number | boolean | null | undefined;
+
+export interface ReportTable {
+  name: string;
+  columns: string[];
+  /** Printed rows (a leading sample of the generated table). */
+  rows: ReportCell[][];
+  /** Rows generated for the table (may exceed rows.length). */
+  totalRows: number;
+}
+
+/** Visual styling of the dataset report, resolved from a VisualTemplate's layoutConfig. */
+export interface ReportTheme {
+  primary: string;
+  /** Text colour on primary-filled areas (the table header). */
+  onPrimary: string;
+  muted: string;
+  text: string;
+  rowAlt: string;
+  fontFamily: PdfFontFamily;
+  baseSize: number;
+  pageSize: "A4" | "LETTER" | "LEGAL";
+  orientation: "portrait" | "landscape";
+  /** Shown in the footer (template branding.companyName / footerText). */
+  brand: string | null;
+}
+
+/** Standard black-and-white table layout, used when a job has no (valid) template. */
+export const DEFAULT_REPORT_THEME: ReportTheme = {
+  primary: "#000000",
+  onPrimary: "#ffffff",
+  muted: "#555555",
+  text: "#000000",
+  rowAlt: "#f2f2f2",
+  fontFamily: "Helvetica",
+  baseSize: 7.5,
+  pageSize: "A4",
+  orientation: "landscape",
+  brand: null,
+};
+
+const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readColor(value: unknown): string | undefined {
+  return typeof value === "string" && HEX_COLOR.test(value) ? value : undefined;
+}
+
+function readFont(value: unknown): PdfFontFamily | undefined {
+  return (PDF_FONT_FAMILIES as readonly unknown[]).includes(value) ? (value as PdfFontFamily) : undefined;
+}
+
+/**
+ * Maps a template's layoutConfig (document templates' colors / typography /
+ * branding, or generic colors / fonts) onto the report theme. Anything missing
+ * or malformed falls back to DEFAULT_REPORT_THEME, so this never throws.
+ */
+export function resolveReportTheme(layoutConfig: unknown): ReportTheme {
+  const config = asRecord(layoutConfig);
+  const colors = asRecord(config.colors);
+  const typography = asRecord(config.typography);
+  const branding = asRecord(config.branding);
+  const firstFont = asRecord(Array.isArray(config.fonts) ? config.fonts[0] : undefined);
+
+  const rawSize = typeof typography.baseSize === "number" ? typography.baseSize : firstFont.size;
+  // Report cells are dense: scale document body sizes (8–14pt) into a 6–11pt range
+  const baseSize =
+    typeof rawSize === "number" && Number.isFinite(rawSize)
+      ? Math.min(11, Math.max(6, rawSize * 0.8))
+      : DEFAULT_REPORT_THEME.baseSize;
+  const pageSize = ["A4", "LETTER", "LEGAL"].includes(config.pageSize as string)
+    ? (config.pageSize as ReportTheme["pageSize"])
+    : DEFAULT_REPORT_THEME.pageSize;
+  const orientation = config.orientation === "portrait" ? "portrait" : DEFAULT_REPORT_THEME.orientation;
+  const brandText = [branding.footerText, branding.companyName].find(
+    (v): v is string => typeof v === "string" && v.trim() !== ""
+  );
+
+  return {
+    primary: readColor(colors.primary) ?? DEFAULT_REPORT_THEME.primary,
+    onPrimary: DEFAULT_REPORT_THEME.onPrimary,
+    muted: readColor(colors.secondary) ?? DEFAULT_REPORT_THEME.muted,
+    text: readColor(colors.text) ?? DEFAULT_REPORT_THEME.text,
+    rowAlt: readColor(colors.accent) ?? DEFAULT_REPORT_THEME.rowAlt,
+    fontFamily: readFont(typography.fontFamily) ?? readFont(firstFont.family) ?? DEFAULT_REPORT_THEME.fontFamily,
+    baseSize,
+    pageSize,
+    orientation,
+    brand: brandText?.trim() ?? null,
+  };
+}
+
+export interface RenderReportInput {
+  title: string;
+  subtitle?: string;
+  tables: ReportTable[];
+  /** Omitted → DEFAULT_REPORT_THEME. */
+  theme?: ReportTheme;
+}
+
+/** Columns printed per table; wider tables list the omitted columns in a note. */
+export const REPORT_MAX_COLUMNS = 10;
+const REPORT_CELL_MAX_CHARS = 48;
+
+const reportStyles = (t: ReportTheme) =>
+  pdf.StyleSheet.create({
+    page: { fontFamily: t.fontFamily, fontSize: t.baseSize, color: t.text, padding: 32, paddingBottom: 48 },
+    cover: { marginBottom: 14, paddingBottom: 10, borderBottomWidth: 2, borderBottomColor: t.primary },
+    title: { fontSize: t.baseSize + 10.5, fontWeight: "bold", color: t.primary },
+    subtitle: { fontSize: t.baseSize + 1.5, color: t.muted, marginTop: 4 },
+    tableTitle: { fontSize: t.baseSize + 4.5, fontWeight: "bold", marginBottom: 2 },
+    tableMeta: { fontSize: t.baseSize + 0.5, color: t.muted, marginBottom: 8 },
+    head: { flexDirection: "row", backgroundColor: t.primary, color: t.onPrimary, paddingVertical: 4 },
+    headCell: { flexGrow: 1, flexBasis: 0, paddingHorizontal: 3, fontWeight: "bold" },
+    row: { flexDirection: "row", paddingVertical: 3, borderBottomWidth: 0.5, borderBottomColor: "#d9d9d9" },
+    rowAlt: { backgroundColor: t.rowAlt },
+    cell: { flexGrow: 1, flexBasis: 0, paddingHorizontal: 3 },
+    numeric: { textAlign: "right" },
+    note: { marginTop: 6, fontSize: t.baseSize - 0.5, color: t.muted },
+    footer: {
+      position: "absolute",
+      bottom: 20,
+      left: 32,
+      right: 32,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      fontSize: t.baseSize - 0.5,
+      color: t.muted,
+    },
+  });
+
+function formatReportCell(value: ReportCell): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  const text = String(value);
+  return text.length > REPORT_CELL_MAX_CHARS ? `${text.slice(0, REPORT_CELL_MAX_CHARS - 1)}…` : text;
+}
+
+function DatasetReport({ title, subtitle, tables, theme = DEFAULT_REPORT_THEME }: RenderReportInput) {
+  const { Document, Page, Text, View } = pdf;
+  const s = reportStyles(theme);
+  const countFormat = new Intl.NumberFormat("en-US");
+
+  return (
+    <Document title={title} creator="DataForge" producer="DataForge">
+      {tables.map((table, t) => {
+        const columns = table.columns.slice(0, REPORT_MAX_COLUMNS);
+        const omitted = table.columns.slice(REPORT_MAX_COLUMNS);
+        // Right-align columns whose printed values are all numeric
+        const numeric = columns.map((_, c) =>
+          table.rows.length > 0 && table.rows.every((r) => r[c] === null || r[c] === undefined || typeof r[c] === "number")
+        );
+        return (
+          <Page key={t} size={theme.pageSize} orientation={theme.orientation} style={s.page}>
+            {t === 0 && (
+              <View style={s.cover}>
+                <Text style={s.title}>{title}</Text>
+                {subtitle ? <Text style={s.subtitle}>{subtitle}</Text> : null}
+              </View>
+            )}
+            <Text style={s.tableTitle}>{table.name}</Text>
+            <Text style={s.tableMeta}>
+              {table.rows.length < table.totalRows
+                ? `Showing the first ${countFormat.format(table.rows.length)} of ${countFormat.format(table.totalRows)} rows — the full table is in the CSV / JSON / SQL exports.`
+                : `${countFormat.format(table.totalRows)} rows`}
+            </Text>
+            <View style={s.head} fixed>
+              {columns.map((c, i) => (
+                <Text key={i} style={numeric[i] ? [s.headCell, s.numeric] : s.headCell}>
+                  {c}
+                </Text>
+              ))}
+            </View>
+            {table.rows.map((row, r) => (
+              <View key={r} style={r % 2 === 1 ? [s.row, s.rowAlt] : s.row} wrap={false}>
+                {columns.map((_, c) => (
+                  <Text key={c} style={numeric[c] ? [s.cell, s.numeric] : s.cell}>
+                    {formatReportCell(row[c])}
+                  </Text>
+                ))}
+              </View>
+            ))}
+            {omitted.length > 0 && (
+              <Text style={s.note}>
+                {omitted.length} more column{omitted.length === 1 ? "" : "s"} not shown: {omitted.join(", ")}
+              </Text>
+            )}
+            <View style={s.footer} fixed>
+              <Text>{theme.brand ?? "DataForge"} · {title}</Text>
+              <Text render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
+            </View>
+          </Page>
+        );
+      })}
+    </Document>
+  );
+}
+
+/** Renders generated tables as a paginated, landscape PDF report. */
+export async function renderDatasetReportPdf(input: RenderReportInput): Promise<Buffer> {
+  await loadReactPdf();
+  return renderToBuffer(<DatasetReport {...input} />);
 }

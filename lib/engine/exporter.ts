@@ -10,6 +10,7 @@ import {
   jobExportPrefix,
   listObjects,
   presignDownloadUrl,
+  uploadBuffer,
   uploadFile,
   workspaceExportPrefix,
 } from "@/lib/storage/s3";
@@ -514,7 +515,9 @@ export async function createSqlDumpWriter(
 // Publishing
 // ============================================
 
-export type ExportFileFormat = "csv" | "zip" | "sql" | "pdf";
+export type ExportFileFormat = "csv" | "json" | "zip" | "sql" | "pdf";
+
+export const EXPORT_FILE_FORMATS: readonly ExportFileFormat[] = ["csv", "json", "zip", "sql", "pdf"];
 
 export interface PublishedExport {
   key: string;
@@ -525,21 +528,25 @@ export interface PublishedExport {
   sizeBytes: number;
 }
 
-const CONTENT_TYPES: Record<ExportFileFormat, string> = {
+export const CONTENT_TYPES: Record<ExportFileFormat, string> = {
   csv: "text/csv; charset=utf-8",
+  json: "application/json; charset=utf-8",
   zip: "application/zip",
   sql: "application/sql; charset=utf-8",
   pdf: "application/pdf",
 };
 
 async function zipFiles(
-  files: { name: string; path: string }[],
+  files: ({ name: string; path: string } | { name: string; data: Buffer })[],
   outPath: string
 ): Promise<void> {
   try {
     const archive = new ZipArchive({ zlib: { level: 6 } });
     const written = pipeline(archive, createWriteStream(outPath));
-    for (const file of files) archive.file(file.path, { name: file.name });
+    for (const file of files) {
+      if ("data" in file) archive.append(file.data, { name: file.name });
+      else archive.file(file.path, { name: file.name });
+    }
     await Promise.all([archive.finalize(), written]);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -560,6 +567,26 @@ async function publishFile(
   return { key, fileName, format, url, sizeBytes };
 }
 
+async function publishBuffer(
+  workspaceId: string,
+  jobId: string,
+  fileName: string,
+  data: Buffer,
+  format: ExportFileFormat
+): Promise<PublishedExport> {
+  const key = `${jobExportPrefix(workspaceId, jobId)}${fileName}`;
+  const sizeBytes = await uploadBuffer(key, data, CONTENT_TYPES[format], fileName);
+  const url = await presignDownloadUrl(key);
+  return { key, fileName, format, url, sizeBytes };
+}
+
+export interface PublishOptions {
+  /** Format whose file becomes the job's exportUrl (falls back to the default primary). */
+  primaryFormat?: ExportFileFormat;
+  /** Rendered PDF report published next to the data files. */
+  pdf?: Buffer;
+}
+
 /**
  * Uploads a job's finished files to the private bucket. Every job gets
  * dataset.zip bundling one CSV and one JSON array file per table plus the SQL
@@ -573,7 +600,8 @@ export async function publishJobExport(
   downloadBase: string,
   writers: TableExportWriter[],
   sqlWriter?: SqlDumpWriter,
-  jsonWriters: TableExportWriter[] = []
+  jsonWriters: TableExportWriter[] = [],
+  options: PublishOptions = {}
 ): Promise<{ primary: PublishedExport; files: PublishedExport[] }> {
   if (writers.length === 0) {
     throw new ExportError("No export files to publish");
@@ -602,21 +630,74 @@ export async function publishJobExport(
       await publishFile(workspaceId, jobId, sqlWriter.fileName, sqlWriter.filePath, "sql")
     );
   }
+
+  const base = sanitizeFileName(downloadBase, "export");
+  // A single table's JSON array is offered on its own when JSON was requested
+  if (options.primaryFormat === "json" && jsonWriters.length === 1) {
+    files.push(
+      await publishFile(workspaceId, jobId, `${base}.json`, jsonWriters[0].filePath, "json")
+    );
+  }
+  if (options.pdf) {
+    files.push(await publishBuffer(workspaceId, jobId, `${base}_report.pdf`, options.pdf, "pdf"));
+  }
+
+  const requested = files.find((f) => f.format === options.primaryFormat);
+  return { primary: requested ?? primary, files };
+}
+
+export const DOCUMENTS_PDF_FILE_NAME = "documents.pdf";
+
+/**
+ * Publishes a DOCUMENT job: the combined multi-page PDF and, when the job
+ * rendered more than one document, a ZIP holding one PDF per document plus the
+ * combined documents.pdf. The combined PDF is the primary export unless
+ * `primaryFormat` is "zip".
+ */
+export async function publishDocumentExport(
+  workspaceId: string,
+  jobId: string,
+  downloadBase: string,
+  combined: Buffer,
+  perDocument: { name: string; data: Buffer }[],
+  primaryFormat: ExportFileFormat = "pdf"
+): Promise<{ primary: PublishedExport; files: PublishedExport[] }> {
+  const base = sanitizeFileName(downloadBase, "documents");
+  const pdf = await publishBuffer(workspaceId, jobId, `${base}.pdf`, combined, "pdf");
+  const files = [pdf];
+
+  if (perDocument.length > 1) {
+    const dir = getJobStagingDir(jobId);
+    await mkdir(dir, { recursive: true });
+    const zipPath = resolveInsideStaging(jobId, `__${base}.zip`);
+    const used = new Set<string>();
+    const entries = perDocument.map(({ name, data }, i) => {
+      const stem = sanitizeFileName(name, `document_${i + 1}`);
+      let entry = stem;
+      for (let n = 2; used.has(entry.toLowerCase()); n++) entry = `${stem}_${n}`;
+      used.add(entry.toLowerCase());
+      return { name: `${entry}.pdf`, data };
+    });
+    await zipFiles([{ name: DOCUMENTS_PDF_FILE_NAME, data: combined }, ...entries], zipPath);
+    files.push(await publishFile(workspaceId, jobId, `${base}.zip`, zipPath, "zip"));
+  }
+
+  const primary = files.find((f) => f.format === primaryFormat) ?? pdf;
   return { primary, files };
 }
 
-/** Finds a job's published file of `format` and signs a fresh download URL for it. */
-export async function getJobExportDownload(
+/** Finds a job's published file of `format`. */
+export async function findJobExport(
   workspaceId: string,
   jobId: string,
   format: ExportFileFormat
-): Promise<{ url: string; fileName: string } | null> {
+): Promise<{ key: string; fileName: string; sizeBytes?: number } | null> {
   const prefix = jobExportPrefix(workspaceId, jobId);
   for await (const object of listObjects(prefix)) {
     const fileName = object.Key?.slice(prefix.length);
     if (!fileName || fileName.includes("/") || fileName.startsWith("__")) continue;
     if (fileName.toLowerCase().endsWith(`.${format}`)) {
-      return { url: await presignDownloadUrl(object.Key!), fileName };
+      return { key: object.Key!, fileName, sizeBytes: object.Size };
     }
   }
   return null;

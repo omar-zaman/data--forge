@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* dark: utilities follow the .dark class set by next-themes, not the OS media query */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* Light mode colors */
   --color-background: oklch(100% 0 0);
@@ -23,30 +26,62 @@
   --color-card-foreground: var(--color-slate-900);
   --color-popover: var(--color-white);
   --color-popover-foreground: var(--color-slate-900);
+
+  /* Categorical chart palette (analytics dashboard) */
+  --color-chart-1: oklch(58% 0.17 250);
+  --color-chart-2: oklch(64% 0.15 165);
+  --color-chart-3: oklch(72% 0.16 70);
+  --color-chart-4: oklch(60% 0.2 20);
+  --color-chart-5: oklch(56% 0.19 300);
+  --color-chart-6: oklch(66% 0.12 210);
+  --color-chart-7: oklch(62% 0.14 130);
+  --color-chart-8: oklch(64% 0.17 340);
+  --color-chart-grid: var(--color-slate-200);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-background: oklch(9% 0 0);
-    --color-foreground: oklch(98% 0 0);
-    --color-primary: oklch(60% 0.18 250);
-    --color-primary-foreground: oklch(100% 0 0);
-    --color-secondary: oklch(15% 0 0);
-    --color-secondary-foreground: oklch(98% 0 0);
-    --color-muted: oklch(15% 0 0);
-    --color-muted-foreground: oklch(65% 0 0);
-    --color-accent: oklch(15% 0 0);
-    --color-accent-foreground: oklch(98% 0 0);
-    --color-destructive: oklch(31% 0.17 25);
-    --color-destructive-foreground: oklch(98% 0 0);
-    --color-border: var(--color-slate-800);
-    --color-ring: oklch(60% 0.18 250);
-    --color-input: var(--color-slate-700);
-    --color-card: var(--color-slate-900);
-    --color-card-foreground: var(--color-slate-50);
-    --color-popover: var(--color-slate-900);
-    --color-popover-foreground: var(--color-slate-50);
-  }
+.dark {
+  color-scheme: dark;
+  /* Slate-based so surfaces match the slate-950 page gradients */
+  --color-background: var(--color-slate-950);
+  --color-foreground: var(--color-slate-50);
+  --color-primary: oklch(62% 0.18 250);
+  --color-primary-foreground: oklch(100% 0 0);
+  --color-secondary: var(--color-slate-800);
+  --color-secondary-foreground: var(--color-slate-50);
+  --color-muted: var(--color-slate-800);
+  --color-muted-foreground: var(--color-slate-400);
+  --color-accent: var(--color-slate-800);
+  --color-accent-foreground: var(--color-slate-50);
+  --color-destructive: oklch(62% 0.22 25);
+  --color-destructive-foreground: oklch(98% 0 0);
+  --color-border: var(--color-slate-800);
+  --color-ring: oklch(62% 0.18 250);
+  --color-input: var(--color-slate-700);
+  --color-card: var(--color-slate-900);
+  --color-card-foreground: var(--color-slate-50);
+  --color-popover: var(--color-slate-900);
+  --color-popover-foreground: var(--color-slate-50);
+
+  --color-chart-1: oklch(68% 0.16 250);
+  --color-chart-2: oklch(72% 0.14 165);
+  --color-chart-3: oklch(80% 0.15 75);
+  --color-chart-4: oklch(68% 0.19 20);
+  --color-chart-5: oklch(68% 0.17 300);
+  --color-chart-6: oklch(74% 0.11 210);
+  --color-chart-7: oklch(72% 0.14 130);
+  --color-chart-8: oklch(72% 0.16 340);
+  --color-chart-grid: var(--color-slate-800);
+}
+
+/* Leaflet popups follow the app's popover surface in both themes */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--color-popover);
+  color: var(--color-popover-foreground);
+}
+.leaflet-container {
+  font-family: inherit;
+  background: var(--color-muted);
 }
 
 /* Sheet (drawer) slide animations — used by components/ui/sheet.tsx */

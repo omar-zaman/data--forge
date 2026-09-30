@@ -1,13 +1,17 @@
 import { Rocket, Zap, Database, Code2 } from "lucide-react";
 import Link from "next/link";
 import { auth } from "@/auth";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export default async function HomePage() {
   const session = await auth();
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
-      <div className="container mx-auto px-4 py-16">
+      <header className="flex h-12 items-center justify-end px-4">
+        <ThemeToggle />
+      </header>
+      <div className="container mx-auto px-4 pb-16 pt-4">
         {/* Hero Section */}
         <div className="text-center mb-16">
           <div className="inline-flex items-center gap-2 mb-6">

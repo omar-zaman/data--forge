@@ -1,10 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  BarChart3,
+  Braces,
   Database,
+  Eye,
+  ExternalLink,
   FileArchive,
   FileSpreadsheet,
   FileText,
@@ -45,6 +50,12 @@ import HealthReportModal, {
   type HealthLevel,
 } from "./health-report-modal";
 
+// Recharts + Leaflet are only downloaded once a dashboard is opened
+const AnalyticsDashboard = dynamic(
+  () => import("@/components/modules/analytics/analytics-dashboard"),
+  { loading: () => <Skeleton className="h-96 w-full rounded-xl" /> }
+);
+
 // ============================================
 // Types & helpers
 // ============================================
@@ -71,11 +82,17 @@ export interface JobRow {
   health: { errorCount: number; warningCount: number } | null;
   /** "invoice" | "statement" for DOCUMENT jobs (PDF output); null for data jobs. */
   documentType: string | null;
+  /** Requested primary format ("CSV" | "JSON" | "SQL" | "PDF" | "ZIP"); null on older jobs. */
+  exportFormat: string | null;
+  /** Formats published for the job; empty on older jobs (inferred from exportUrl). */
+  exportFiles: string[];
   createdAt: string;
   completedAt: string | null;
 }
 
-type RawJob = Omit<JobRow, "health" | "documentType"> & {
+type RawJob = Omit<JobRow, "health" | "documentType" | "exportFormat" | "exportFiles"> & {
+  exportFormat?: string | null;
+  exportFiles?: string[];
   validationResults?: { summary?: unknown; createdAt?: string }[];
   documentConfig?: { template?: { layoutConfig?: { documentType?: unknown } } } | null;
 };
@@ -121,6 +138,8 @@ export function toJobRow(raw: RawJob): JobRow {
       typeof raw.documentConfig?.template?.layoutConfig?.documentType === "string"
         ? raw.documentConfig.template.layoutConfig.documentType
         : null,
+    exportFormat: raw.exportFormat ?? null,
+    exportFiles: Array.isArray(raw.exportFiles) ? raw.exportFiles : [],
     createdAt: raw.createdAt,
     completedAt: raw.completedAt,
   };
@@ -169,27 +188,52 @@ function safeDownloadHref(url: string | null): string | null {
   }
 }
 
-type DownloadFormat = "zip" | "csv" | "sql" | "pdf";
+type DownloadFormat = "zip" | "csv" | "json" | "sql" | "pdf";
 
-/** Multi-table jobs store dataset.zip as their exportUrl; single-table jobs a CSV (plus a ZIP). */
-function primaryExportFormat(exportUrl: string | null): "zip" | "csv" | "pdf" | null {
+const DOWNLOAD_FORMAT_ORDER: DownloadFormat[] = ["pdf", "csv", "json", "zip", "sql"];
+
+/** The format of the file exportUrl points at (the job's primary download). */
+function primaryExportFormat(exportUrl: string | null): DownloadFormat | null {
   const href = safeDownloadHref(exportUrl);
   if (!href) return null;
   const pathname = new URL(href, "http://localhost").pathname.toLowerCase();
-  if (pathname.endsWith(".pdf")) return "pdf";
-  return pathname.endsWith(".zip") ? "zip" : "csv";
+  const ext = pathname.slice(pathname.lastIndexOf(".") + 1);
+  return (DOWNLOAD_FORMAT_ORDER as string[]).includes(ext) ? (ext as DownloadFormat) : "csv";
 }
 
-/** Resolves a fresh presigned URL for one of the job's exports. */
-async function fetchDownloadUrl(jobId: string, format: DownloadFormat): Promise<string> {
-  const res = await fetch(`/api/jobs/${jobId}/download?format=${format}`, {
-    cache: "no-store",
-  });
-  const body = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  const href = safeDownloadHref(body.url ?? null);
-  if (!href) throw new Error("The server returned an invalid download link");
-  return href;
+/** Same-origin URL that renders the job's PDF in the browser instead of downloading it. */
+function pdfPreviewHref(jobId: string): string {
+  return `/api/jobs/${encodeURIComponent(jobId)}/download?format=pdf&inline=1`;
+}
+
+function hasPdf(job: JobRow): boolean {
+  return job.status === "COMPLETED" && exportFormats(job).includes("pdf");
+}
+
+/**
+ * Saves one of the job's exports to the user's machine exactly as generated.
+ * The file is streamed same-origin by /api/jobs/[id]/download; a HEAD check
+ * first turns failures into toasts instead of a broken download, then the
+ * browser's own download manager fetches the file (no in-memory blob, so
+ * large datasets are fine).
+ */
+async function downloadExport(jobId: string, format: DownloadFormat): Promise<void> {
+  const href = `/api/jobs/${encodeURIComponent(jobId)}/download?format=${format}`;
+  const head = await fetch(href, { method: "HEAD", cache: "no-store" });
+  if (!head.ok) {
+    // HEAD has no body; the GET fails the same way before any file is sent
+    const res = await fetch(href, { cache: "no-store" });
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${head.status}`);
+  }
+
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = ""; // name comes from the Content-Disposition header
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function formatDate(iso: string): string {
@@ -274,11 +318,18 @@ export function useWorkspaceJobs(workspaceId: string) {
           description: "Open the job's Health Report to see which rows and columns failed.",
         });
       } else if (incoming.status === "COMPLETED") {
+        const [format] = exportFormats(incoming);
         toast.success("Generation complete", {
           id: `job-done-${incoming.id}`,
           description: incoming.documentType
-            ? `${formatJobSize(incoming)} rendered to PDF and ready to download.`
-            : `${incoming.rowCount?.toLocaleString() ?? "All"} rows are ready to download.`,
+            ? `${formatJobSize(incoming)} rendered to PDF and ready to export.`
+            : `${incoming.rowCount?.toLocaleString() ?? "All"} rows are ready to export.`,
+          ...(format && {
+            action: {
+              label: `Export ${format.toUpperCase()}`,
+              onClick: () => void exportWithToast(incoming.id, format),
+            },
+          }),
         });
       } else if (incoming.status === "FAILED") {
         const archiveFailed = normalizeErrors(incoming.validationErrors).some(
@@ -425,11 +476,41 @@ const DOWNLOAD_OPTIONS: Record<
   DownloadFormat,
   { label: string; icon: typeof FileArchive }
 > = {
-  zip: { label: "Download ZIP (CSV + JSON)", icon: FileArchive },
-  csv: { label: "Download CSV", icon: FileSpreadsheet },
-  sql: { label: "Download SQL Dump", icon: Database },
-  pdf: { label: "Download PDF", icon: FileText },
+  zip: { label: "Export ZIP (CSV + JSON)", icon: FileArchive },
+  csv: { label: "Export CSV", icon: FileSpreadsheet },
+  json: { label: "Export JSON", icon: Braces },
+  sql: { label: "Export SQL Dump", icon: Database },
+  pdf: { label: "Export PDF", icon: FileText },
 };
+
+/**
+ * The primary download leads, followed by every other published file. Older
+ * jobs without exportFiles: single-table jobs lead with the plain CSV; every
+ * data job has the ZIP (CSV + JSON + SQL).
+ */
+function exportFormats(job: JobRow): DownloadFormat[] {
+  const primary = primaryExportFormat(job.exportUrl);
+  if (job.exportFiles.length > 0) {
+    const published = DOWNLOAD_FORMAT_ORDER.filter((f) => job.exportFiles.includes(f));
+    return primary && published.includes(primary)
+      ? [primary, ...published.filter((f) => f !== primary)]
+      : published;
+  }
+  if (primary === "pdf") return ["pdf"];
+  if (primary === "csv") return ["csv", "zip", "sql"];
+  if (primary === "zip") return ["zip", "sql"];
+  return [];
+}
+
+async function exportWithToast(jobId: string, format: DownloadFormat): Promise<void> {
+  try {
+    await downloadExport(jobId, format);
+  } catch (err) {
+    toast.error(`${DOWNLOAD_OPTIONS[format].label} failed`, {
+      description: err instanceof Error ? err.message : "Unknown error",
+    });
+  }
+}
 
 /** "12 invoices" for document jobs, "1,000" rows otherwise. */
 function formatJobSize(job: JobRow): string {
@@ -439,33 +520,50 @@ function formatJobSize(job: JobRow): string {
   return `${job.rowCount.toLocaleString()} ${noun}${job.rowCount === 1 ? "" : "s"}`;
 }
 
-function DownloadButtons({ job }: { job: JobRow }) {
-  const [pending, setPending] = useState<DownloadFormat | null>(null);
-  const primary = primaryExportFormat(job.exportUrl);
+function downloadLabel(job: JobRow, format: DownloadFormat): string {
+  // Document jobs' ZIP holds one PDF per document plus the combined documents.pdf
+  if (format === "zip" && job.documentType) return "Export ZIP (PDFs)";
+  return DOWNLOAD_OPTIONS[format].label;
+}
 
-  if (!primary) return <span className="text-xs">No export available</span>;
+interface DownloadButtonsProps {
+  job: JobRow;
+  onPreview: (job: JobRow) => void;
+  onVisualize: (job: JobRow) => void;
+}
+
+function DownloadButtons({ job, onPreview, onVisualize }: DownloadButtonsProps) {
+  const [pending, setPending] = useState<DownloadFormat | null>(null);
+  const formats = exportFormats(job);
+
+  if (formats.length === 0) return <span className="text-xs">No export available</span>;
 
   async function handleDownload(format: DownloadFormat) {
     setPending(format);
     try {
-      window.location.assign(await fetchDownloadUrl(job.id, format));
-    } catch (err) {
-      toast.error(`${DOWNLOAD_OPTIONS[format].label} failed`, {
-        description: err instanceof Error ? err.message : "Unknown error",
-      });
+      await exportWithToast(job.id, format);
     } finally {
       setPending(null);
     }
   }
 
-  // Single-table jobs lead with the plain CSV; every job has the ZIP (CSV + JSON + SQL)
-  const formats: DownloadFormat[] =
-    primary === "pdf" ? ["pdf"] : primary === "csv" ? ["csv", "zip", "sql"] : ["zip", "sql"];
-
   return (
     <div className="flex flex-wrap justify-end gap-2">
+      {!job.documentType && (
+        <Button size="sm" variant="outline" onClick={() => onVisualize(job)}>
+          <BarChart3 />
+          Visualize
+        </Button>
+      )}
+      {formats.includes("pdf") && (
+        <Button size="sm" variant="outline" onClick={() => onPreview(job)}>
+          <Eye />
+          Preview PDF
+        </Button>
+      )}
       {formats.map((format, i) => {
-        const { label, icon: Icon } = DOWNLOAD_OPTIONS[format];
+        const { icon: Icon } = DOWNLOAD_OPTIONS[format];
+        const label = downloadLabel(job, format);
         return (
           <Button
             key={format}
@@ -488,9 +586,18 @@ interface JobRowViewProps {
   onUpdate: (job: JobRow) => void;
   onViewError: (job: JobRow) => void;
   onViewHealth: (job: JobRow) => void;
+  onPreview: (job: JobRow) => void;
+  onVisualize: (job: JobRow) => void;
 }
 
-function JobRowView({ job, onUpdate, onViewError, onViewHealth }: JobRowViewProps) {
+function JobRowView({
+  job,
+  onUpdate,
+  onViewError,
+  onViewHealth,
+  onPreview,
+  onVisualize,
+}: JobRowViewProps) {
   useJobPolling(job, onUpdate);
 
   const active = isActive(job.status);
@@ -512,7 +619,19 @@ function JobRowView({ job, onUpdate, onViewError, onViewHealth }: JobRowViewProp
         {formatJobSize(job)}
       </TableCell>
       <TableCell>
-        <HealthBadge job={job} onOpen={onViewHealth} />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <HealthBadge job={job} onOpen={onViewHealth} />
+          {hasPdf(job) && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-transparent bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300"
+              title="This job produced a PDF"
+            >
+              <FileText className="size-3" />
+              PDF
+            </Badge>
+          )}
+        </div>
       </TableCell>
       <TableCell className="w-48">
         <div className="flex items-center gap-2">
@@ -531,7 +650,9 @@ function JobRowView({ job, onUpdate, onViewError, onViewHealth }: JobRowViewProp
         </div>
       </TableCell>
       <TableCell className="text-right">
-        {job.status === "COMPLETED" && <DownloadButtons job={job} />}
+        {job.status === "COMPLETED" && (
+          <DownloadButtons job={job} onPreview={onPreview} onVisualize={onVisualize} />
+        )}
         {job.status === "FAILED" && (
           <Button size="sm" variant="outline" onClick={() => onViewError(job)}>
             <AlertTriangle />
@@ -565,6 +686,8 @@ export default function JobHistoryTable({
 }: JobHistoryTableProps) {
   const [errorJob, setErrorJob] = useState<JobRow | null>(null);
   const [healthJobId, setHealthJobId] = useState<string | null>(null);
+  const [previewJob, setPreviewJob] = useState<JobRow | null>(null);
+  const [analyticsJob, setAnalyticsJob] = useState<JobRow | null>(null);
   const { openAssistant } = useAssistant();
   const activeCount = jobs.filter((j) => isActive(j.status)).length;
   const errors = errorJob ? normalizeErrors(errorJob.validationErrors) : [];
@@ -633,6 +756,8 @@ export default function JobHistoryTable({
                     onUpdate={onJobUpdate}
                     onViewError={setErrorJob}
                     onViewHealth={(j) => setHealthJobId(j.id)}
+                    onPreview={setPreviewJob}
+                    onVisualize={setAnalyticsJob}
                   />
                 ))}
               </TableBody>
@@ -642,6 +767,53 @@ export default function JobHistoryTable({
       </Card>
 
       <HealthReportModal jobId={healthJobId} onClose={() => setHealthJobId(null)} />
+
+      <Dialog open={previewJob !== null} onOpenChange={(open) => !open && setPreviewJob(null)}>
+        <DialogContent className="flex h-[88vh] max-w-5xl flex-col gap-3">
+          <DialogHeader>
+            <DialogTitle>PDF preview</DialogTitle>
+            <DialogDescription>
+              Job <span className="font-mono">{previewJob?.id}</span>
+              {previewJob && ` · ${formatJobSize(previewJob)}`}
+            </DialogDescription>
+          </DialogHeader>
+          {previewJob && (
+            <>
+              <iframe
+                key={previewJob.id}
+                src={pdfPreviewHref(previewJob.id)}
+                title={`PDF preview for job ${previewJob.id}`}
+                className="min-h-0 w-full flex-1 rounded-md border border-[var(--color-border)] bg-white"
+              />
+              <div className="flex justify-end gap-2">
+                <Button size="sm" variant="outline" asChild>
+                  <a href={pdfPreviewHref(previewJob.id)} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink />
+                    Open in new tab
+                  </a>
+                </Button>
+                <Button size="sm" onClick={() => void exportWithToast(previewJob.id, "pdf")}>
+                  <FileText />
+                  Download PDF
+                </Button>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={analyticsJob !== null} onOpenChange={(open) => !open && setAnalyticsJob(null)}>
+        <DialogContent className="flex max-h-[92vh] max-w-6xl flex-col gap-4 overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Analytics &amp; Visualizations</DialogTitle>
+            <DialogDescription>
+              Job <span className="font-mono">{analyticsJob?.id}</span>
+              {analyticsJob && ` · ${formatJobSize(analyticsJob)} rows`}
+            </DialogDescription>
+          </DialogHeader>
+          {analyticsJob && <AnalyticsDashboard key={analyticsJob.id} jobId={analyticsJob.id} />}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={errorJob !== null} onOpenChange={(open) => !open && setErrorJob(null)}>
         <DialogContent className="max-w-lg">
